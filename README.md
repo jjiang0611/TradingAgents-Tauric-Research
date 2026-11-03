@@ -406,6 +406,14 @@ One page for the daily routine: account value against buy-and-hold of the same t
 
 It listens on 127.0.0.1 only and has no login. The Run route needs a token that only the served page carries and refuses requests whose Host header is not this server, so a web page you happen to have open cannot start a run. Do not put it behind a tunnel or reverse proxy.
 
+### Daily schedule
+
+```bash
+tradingagents paper run main --trading-days-only
+```
+
+Schedule that one command after the US close. It uses New York's date, does nothing on weekends and market holidays, skips tickers it has already decided, exits non-zero when a ticker failed (so the next trigger retries it), and never overlaps a run from the dashboard. Each attempt is logged to `runs.log` beside the account. Authentication stays on your computer. Setup for macOS, Linux and Windows, and what a missed day means, is in [docs/paper-schedule.md](docs/paper-schedule.md).
+
 ## Reproducibility
 
 TradingAgents is LLM-driven, so two runs of the same ticker and date can differ. This is expected for a research tool built on language models, not a defect. The variation comes from a few distinct sources, and it helps to separate them.

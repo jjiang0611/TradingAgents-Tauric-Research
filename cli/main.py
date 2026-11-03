@@ -205,25 +205,46 @@ def paper_run(
     name: str = typer.Argument(..., help="Account name"),
     date: str = typer.Option(None, "--date", help="Decision date, YYYY-MM-DD; default today"),
     analysts: str = typer.Option(None, "--analysts", help="Comma-separated analysts; omit for all"),
+    trading_days_only: bool = typer.Option(
+        False, "--trading-days-only",
+        help="For schedulers: use New York's date, and exit 0 doing nothing when the US market "
+        "held no session that day (weekends, holidays). Safe to run several times a day.",
+    ),
 ):
     """Fill earlier decisions, then decide for every ticker on the date."""
-    from tradingagents.paper.runner import run_day
+    from tradingagents.paper import runner as paper
 
     account = _paper_account(name)
     try:
+        if trading_days_only:
+            date = date or paper.new_york_today()
+            if not paper.market_traded(date):
+                message = f"{date}: no US market session; nothing to do."
+                paper.log_run(DEFAULT_CONFIG, name, message)
+                console.print(message)
+                return
         chosen = (parse_analysts(analysts, AssetType.STOCK) if analysts
                   else filter_analysts_for_asset_type(list(AnalystType), AssetType.STOCK))
-        result = run_day(account, DEFAULT_CONFIG, date, selected_analysts=[a.value for a in chosen],
-                         progress=lambda i, n, t: console.print(f"[dim][{i}/{n}] {t}[/dim]"))
+        result = paper.run_day(account, DEFAULT_CONFIG, date, selected_analysts=[a.value for a in chosen],
+                               progress=lambda i, n, t: console.print(f"[dim][{i}/{n}] {t}[/dim]"))
+    except paper.RunInProgress as exc:
+        paper.log_run(DEFAULT_CONFIG, name, f"skipped: {exc}")
+        console.print(f"[yellow]{exc}[/yellow]")
+        return
     except Exception as exc:  # a missing key or a date the graph rejects is a setup error
+        paper.log_run(DEFAULT_CONFIG, name, f"error: {exc}")
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
-    console.print(f"{result.date}: filled {result.filled} earlier decision(s); decided "
-                  + (", ".join(f"{t} {r}" for t, r in result.decided) or "nothing new") + ".")
+    summary = (f"{result.date}: filled {result.filled} earlier decision(s); decided "
+               + (", ".join(f"{t} {r}" for t, r in result.decided) or "nothing new") + ".")
+    console.print(summary)
     for ticker in result.skipped:
         console.print(f"[dim]{ticker} already decided for {result.date}[/dim]")
     for ticker, reason in result.failures:
         console.print(f"[yellow]failed:[/yellow] {ticker}: {reason}")
+    paper.log_run(DEFAULT_CONFIG, name, summary + "".join(f" FAILED {t}: {r}" for t, r in result.failures))
+    if result.failures:  # non-zero so a scheduler records it, and its next trigger retries those tickers
+        raise typer.Exit(code=1)
 
 
 @paper_app.command("status")

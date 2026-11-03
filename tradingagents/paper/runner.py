@@ -17,6 +17,7 @@ import pandas as pd
 from tradingagents.agents.rating import is_review
 from tradingagents.backtest import BacktestSummary, summarize
 from tradingagents.dataflows.date_window import get_current_date
+from tradingagents.dataflows.files import locked
 from tradingagents.dataflows.symbols import safe_ticker_component
 from tradingagents.dataflows.vendors.yahoo.market import get_closes
 from tradingagents.graph.trading_graph import TradingAgentsGraph
@@ -72,6 +73,36 @@ def fetch_all(account: PaperAccount, fetch: ClosesFn = get_closes) -> dict[str, 
     return {t: completed_closes(t, start, end, fetch) for t in dict.fromkeys([*account.tickers, BENCHMARK])}
 
 
+class RunInProgress(RuntimeError):
+    """Another process or thread is already running this account."""
+
+
+def market_traded(date: str, fetch: ClosesFn = get_closes) -> bool:
+    """Whether the US market held a session on ``date`` (SPY printed a bar for it).
+
+    Meant for a run after the close: during the session the bar exists but is
+    partial. A failed fetch raises, so an outage is not mistaken for a holiday.
+    """
+    end = (datetime.strptime(date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    bars = fetch(BENCHMARK, date, end)
+    return bool(len(bars)) and any(ts.strftime("%Y-%m-%d") == date for ts in bars.index)
+
+
+def new_york_today() -> str:
+    """Today's date in New York, the market's own calendar day, wherever this machine is."""
+    import pytz
+
+    return datetime.now(pytz.timezone("America/New_York")).strftime("%Y-%m-%d")
+
+
+def log_run(config: dict, name: str, message: str) -> None:
+    """Append one line to the account's ``runs.log``: the answer to "did it run?"."""
+    path = account_dir(config, name) / "runs.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(f"{datetime.now().astimezone().isoformat(timespec='seconds')} {message}\n")
+
+
 def book_for(account: PaperAccount) -> PortfolioContext:
     """The account as the decision agents see it: real fills only, never a pending order."""
     return PortfolioContext(
@@ -90,7 +121,23 @@ class DayResult:
     filled: int = 0
 
 
-def run_day(
+def run_day(account: PaperAccount, config: dict, *args, **kwargs) -> DayResult:
+    """Run one day for the account, one run at a time per account.
+
+    The account is re-read under the lock, so a run that just finished elsewhere
+    (the scheduler, the dashboard) is not overwritten with a stale copy.
+    """
+    path = account_path(config, account.name)
+    with locked(path, wait=False) as held:
+        if not held:
+            raise RunInProgress(f"a run for paper account {account.name!r} is already in progress")
+        fresh = PaperAccount.load(path)
+        for field_name in PaperAccount.model_fields:
+            setattr(account, field_name, getattr(fresh, field_name))
+        return _run_day(account, config, *args, **kwargs)
+
+
+def _run_day(
     account: PaperAccount,
     config: dict,
     date: str | None = None,
