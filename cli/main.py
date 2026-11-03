@@ -160,6 +160,134 @@ def backtest(
         console.print(f"[yellow]unsettled:[/yellow] {ticker}: {reason}")
 
 
+paper_app = typer.Typer(help="Forward paper trading: a simulated account that acts on the ratings.", no_args_is_help=True)
+app.add_typer(paper_app, name="paper")
+
+
+def _paper_account(name: str):
+    from tradingagents.paper.account import PaperAccount
+    from tradingagents.paper.runner import account_path
+
+    path = account_path(DEFAULT_CONFIG, name)
+    if not path.is_file():
+        console.print(f"[red]No paper account {name!r}. Create it with: tradingagents paper init {name} NVDA,AAPL[/red]")
+        raise typer.Exit(code=1)
+    try:
+        return PaperAccount.load(path)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+
+@paper_app.command("init")
+def paper_init(
+    name: str = typer.Argument(..., help="Name for the account, e.g. main"),
+    tickers: str = typer.Argument(..., help="Comma-separated tickers, e.g. NVDA,AAPL; fixed for the account"),
+    cash: float = typer.Option(10_000.0, "--cash", help="Starting cash, split equally across the tickers"),
+    slippage_bps: float = typer.Option(5.0, "--slippage-bps", help="Adverse price move applied to every fill"),
+):
+    """Create a paper account. Nothing is traded and no broker is involved."""
+    from tradingagents.paper.runner import create_account
+
+    names = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+    try:
+        account = create_account(DEFAULT_CONFIG, name, names, cash, slippage_bps)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    console.print(f"Created paper account {account.name!r}: ${account.starting_cash:,.0f} over "
+                  f"{', '.join(account.tickers)} (${account.sleeve:,.0f} each).")
+    console.print(f"Run it after each close with: tradingagents paper run {account.name}")
+
+
+@paper_app.command("run")
+def paper_run(
+    name: str = typer.Argument(..., help="Account name"),
+    date: str = typer.Option(None, "--date", help="Decision date, YYYY-MM-DD; default today"),
+    analysts: str = typer.Option(None, "--analysts", help="Comma-separated analysts; omit for all"),
+    trading_days_only: bool = typer.Option(
+        False, "--trading-days-only",
+        help="For schedulers: use New York's date, and exit 0 doing nothing when the US market "
+        "held no session that day (weekends, holidays). Safe to run several times a day.",
+    ),
+):
+    """Fill earlier decisions, then decide for every ticker on the date."""
+    from tradingagents.paper import runner as paper
+
+    account = _paper_account(name)
+    try:
+        if trading_days_only:
+            date = date or paper.new_york_today()
+            if not paper.market_traded(date):
+                message = f"{date}: no US market session; nothing to do."
+                paper.log_run(DEFAULT_CONFIG, name, message)
+                console.print(message)
+                return
+        chosen = (parse_analysts(analysts, AssetType.STOCK) if analysts
+                  else filter_analysts_for_asset_type(list(AnalystType), AssetType.STOCK))
+        result = paper.run_day(account, DEFAULT_CONFIG, date, selected_analysts=[a.value for a in chosen],
+                               progress=lambda i, n, t: console.print(f"[dim][{i}/{n}] {t}[/dim]"))
+    except paper.RunInProgress as exc:
+        paper.log_run(DEFAULT_CONFIG, name, f"skipped: {exc}")
+        console.print(f"[yellow]{exc}[/yellow]")
+        return
+    except Exception as exc:  # a missing key or a date the graph rejects is a setup error
+        paper.log_run(DEFAULT_CONFIG, name, f"error: {exc}")
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    summary = (f"{result.date}: filled {result.filled} earlier decision(s); decided "
+               + (", ".join(f"{t} {r}" for t, r in result.decided) or "nothing new") + ".")
+    console.print(summary)
+    for ticker in result.skipped:
+        console.print(f"[dim]{ticker} already decided for {result.date}[/dim]")
+    for ticker, reason in result.failures:
+        console.print(f"[yellow]failed:[/yellow] {ticker}: {reason}")
+    paper.log_run(DEFAULT_CONFIG, name, summary + "".join(f" FAILED {t}: {r}" for t, r in result.failures))
+    if result.failures:  # non-zero so a scheduler records it, and its next trigger retries those tickers
+        raise typer.Exit(code=1)
+
+
+@paper_app.command("status")
+def paper_status(name: str = typer.Argument(..., help="Account name")):
+    """Show the account against buy-and-hold, and how the decisions are scoring."""
+    from tradingagents.paper.runner import status
+
+    try:
+        console.print(status(_paper_account(name), DEFAULT_CONFIG).render())
+    except Exception as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+
+@paper_app.command("dashboard")
+def paper_dashboard(
+    name: str = typer.Argument(..., help="Account name"),
+    port: int = typer.Option(8765, "--port", help="Local port; the server only listens on 127.0.0.1"),
+    open_browser: bool = typer.Option(True, "--open/--no-open", help="Open the dashboard in your browser"),
+):
+    """Serve the account, its research and a Run button on http://127.0.0.1."""
+    import webbrowser
+
+    from tradingagents.paper.dashboard import make_server
+
+    _paper_account(name)
+    try:
+        server = make_server(DEFAULT_CONFIG, name, port=port)
+    except OSError as exc:
+        console.print(f"[red]Cannot listen on port {port}: {exc}. Try --port.[/red]")
+        raise typer.Exit(code=1) from None
+    url = f"http://127.0.0.1:{server.server_address[1]}/"
+    console.print(f"Dashboard for {name!r}: {url}  (Ctrl+C to stop)")
+    if open_browser:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        console.print("\nStopped.")
+    finally:
+        server.server_close()
+
+
 # The plans `login` and `logout` take: the providers signed in to, not keyed.
 Plan = StrEnum("Plan", {name: name for name in SIGNED_IN_PROVIDERS})
 

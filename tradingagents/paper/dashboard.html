@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Paper Trading Desk</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10); --wash: rgba(11,11,11,0.05);
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a;
+  --up: #006300; --down: #d03b3b; --accent: #2a78d6; --on-accent: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10); --wash: rgba(255,255,255,0.07);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70;
+    --up: #0ca30c; --down: #ec6b6b; --accent: #3987e5;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--page); color: var(--ink);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1120px; margin: 0 auto; padding: 24px 16px 64px; }
+h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+h2 { font-size: 15px; margin: 0; }
+.sub { color: var(--ink-2); font-size: 13px; margin-top: 2px; }
+.muted { color: var(--muted); }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-top: 16px; }
+.card-head { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+button, select, input { font: inherit; color: inherit; }
+button, select, input[type=date] { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px; }
+button { cursor: pointer; }
+button:hover:not(:disabled) { background: var(--wash); }
+button:disabled { opacity: 0.5; cursor: default; }
+button.primary { background: var(--accent); color: var(--on-accent); border-color: transparent; font-weight: 600; }
+button.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.08); }
+button[aria-pressed=true], button.on { background: var(--wash); border-color: var(--axis); font-weight: 600; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.top { display: flex; flex-wrap: wrap; gap: 12px 24px; justify-content: space-between; align-items: flex-end; }
+.banner { margin-top: 16px; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--border); background: var(--wash); font-size: 14px; }
+.banner.error { border-color: var(--down); }
+.log { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink-2); margin-top: 6px; white-space: pre-wrap; }
+
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 16px; }
+.kpi { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
+.kpi .label { color: var(--ink-2); font-size: 12px; }
+.kpi .value { font-size: 24px; font-weight: 650; letter-spacing: -0.02em; margin-top: 2px; }
+.kpi .note { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
+.pos { color: var(--up); } .neg { color: var(--down); }
+
+.legend { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.legend button { display: inline-flex; gap: 8px; align-items: center; padding: 3px 10px; font-size: 13px; }
+.legend button[aria-pressed=false] { opacity: 0.45; }
+.key { width: 22px; height: 0; border-top: 3px solid currentColor; display: inline-block; }
+.key.dash { border-top-style: dashed; } .key.dot { border-top-style: dotted; }
+.chart-wrap { position: relative; }
+#chart { width: 100%; height: 320px; display: block; touch-action: pan-y; transition: opacity .15s; }
+#chart.loading { opacity: .5; }
+#chart text { fill: var(--muted); font: 11px system-ui, sans-serif; }
+#chart text.lbl { fill: var(--ink-2); font-size: 12px; }
+#tip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--border);
+  box-shadow: 0 4px 16px rgba(0,0,0,.18); border-radius: 10px; padding: 8px 10px; font-size: 12px; min-width: 190px; display: none; z-index: 5; }
+#tip .d { color: var(--ink-2); margin-bottom: 4px; }
+#tip .r { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+#tip .r b { font-size: 14px; margin-left: auto; }
+.empty { padding: 48px 0; text-align: center; color: var(--ink-2); }
+
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th { text-align: left; font-weight: 500; color: var(--ink-2); font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--axis); white-space: nowrap; }
+td { padding: 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+tr:last-child td { border-bottom: 0; }
+.scroll { overflow-x: auto; }
+.link { background: none; border: 0; padding: 0; color: var(--accent); text-decoration: underline; cursor: pointer; }
+.link:hover:not(:disabled) { background: none; }
+
+.calls { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.call { border: 1px solid var(--border); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 6px; }
+.call .t { font-weight: 650; font-size: 17px; }
+.call p { margin: 0; font-size: 13px; color: var(--ink-2); display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.badge { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: 13px; }
+.badge.up { color: var(--up); } .badge.down { color: var(--down); } .badge.flat { color: var(--ink-2); }
+.chip { font-size: 12px; color: var(--ink-2); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
+
+.bar { height: 8px; background: var(--wash); border-radius: 4px; overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
+
+dialog { border: 1px solid var(--border); border-radius: 14px; background: var(--surface); color: var(--ink);
+  width: min(880px, calc(100vw - 24px)); max-height: calc(100vh - 32px); padding: 0; }
+dialog::backdrop { background: rgba(0,0,0,.5); }
+.dhead { position: sticky; top: 0; background: var(--surface); padding: 14px 18px 0; border-bottom: 1px solid var(--border); z-index: 2; }
+.tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 10px; }
+.tabs button { border-radius: 8px 8px 0 0; border-bottom: 0; font-size: 13px; padding: 5px 10px; }
+.dbody { padding: 4px 18px 20px; overflow-wrap: anywhere; }
+.dbody h3 { font-size: 15px; margin: 20px 0 6px; padding-top: 12px; border-top: 1px solid var(--grid); }
+.dbody h3:first-child { border-top: 0; padding-top: 0; }
+.dbody h4, .dbody h5, .dbody h6 { margin: 14px 0 4px; font-size: 14px; }
+.dbody p, .dbody li { font-size: 14px; }
+.dbody .table { overflow-x: auto; }
+.dbody table { font-size: 13px; } .dbody table th, .dbody table td { white-space: normal; border: 1px solid var(--grid); }
+.foot { margin-top: 28px; font-size: 12px; color: var(--muted); }
+@media (max-width: 560px) { #chart { height: 260px; } .kpi .value { font-size: 20px; } }
+@media (forced-colors: active) { .key { border-top-color: CanvasText; } }
+</style>
+</head>
+<body>
+<main>
+  <div class="top">
+    <div>
+      <h1 id="title">Paper Trading Desk</h1>
+      <div class="sub" id="sub">Loading…</div>
+    </div>
+    <div class="row">
+      <label class="sub" for="runDate">Decision date</label>
+      <input type="date" id="runDate">
+      <button class="primary" id="runBtn">Run analysis</button>
+    </div>
+  </div>
+  <div id="banner" class="banner" hidden></div>
+
+  <section class="kpis" id="kpis" aria-label="Account summary"></section>
+
+  <section class="card" aria-labelledby="chartTitle">
+    <div class="card-head">
+      <h2 id="chartTitle">Account value vs buy-and-hold</h2>
+      <div class="row">
+        <div class="row" id="ranges" role="group" aria-label="Range">
+          <button data-days="30">1M</button><button data-days="90">3M</button><button data-days="0" class="on">All</button>
+        </div>
+        <button id="tableToggle" aria-pressed="false">Table</button>
+      </div>
+    </div>
+    <div class="legend" id="legend"></div>
+    <div class="chart-wrap" id="chartWrap">
+      <svg id="chart" role="img" aria-label="Account value over time against buy-and-hold of the same tickers and SPY"></svg>
+      <div id="tip"></div>
+    </div>
+    <div class="scroll" id="curveTable" hidden></div>
+  </section>
+
+  <section class="card" aria-labelledby="callsTitle">
+    <div class="card-head"><h2 id="callsTitle">Latest call per ticker</h2><span class="sub" id="callsNote"></span></div>
+    <div class="calls" id="calls"></div>
+  </section>
+
+  <section class="card" aria-labelledby="holdTitle">
+    <div class="card-head"><h2 id="holdTitle">Holdings</h2></div>
+    <div class="scroll" id="holdings"></div>
+  </section>
+
+  <section class="card" aria-labelledby="scoreTitle">
+    <div class="card-head"><h2 id="scoreTitle">Is it working?</h2></div>
+    <div id="score"></div>
+  </section>
+
+  <section class="card" aria-labelledby="ordTitle">
+    <div class="card-head">
+      <h2 id="ordTitle">Decisions &amp; fills</h2>
+      <label class="sub">Ticker <select id="ordFilter"></select></label>
+    </div>
+    <div class="scroll" id="orders"></div>
+  </section>
+
+  <p class="foot">Simulated account: no broker, no real orders. Fills happen at the first completed close after a decision,
+  long-only, with the slippage shown above. Research is the model’s output and is not investment advice.</p>
+</main>
+
+<dialog id="dlg" aria-labelledby="dlgTitle">
+  <div class="dhead">
+    <div class="card-head" style="margin-bottom:0">
+      <div><h2 id="dlgTitle"></h2><div class="sub" id="dlgSub"></div></div>
+      <button id="dlgClose" aria-label="Close research">Close</button>
+    </div>
+    <div class="tabs" id="tabs" role="tablist"></div>
+  </div>
+  <div class="dbody" id="dbody"></div>
+</dialog>
+
+<script>
+"use strict";
+const TOKEN = "__TOKEN__";
+const $ = (id) => document.getElementById(id);
+const SERIES = [
+  { id: "strategy", name: "Strategy", css: "--s1", cls: "" },
+  { id: "hold", name: "Buy & hold, same tickers", css: "--s2", cls: "dash" },
+  { id: "spy", name: "Buy & hold, SPY", css: "--s3", cls: "dot" },
+];
+const DASH = { "": "", dash: "7 5", dot: "2 4" };
+let S = null, hidden = new Set(), rangeDays = 0, pollTimer = null, orderLimit = 20;
+
+const money = (v, d = 2) => v == null ? "–" : v.toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: d, maximumFractionDigits: d });
+const pct = (v, d = 2) => v == null ? "–" : (v >= 0 ? "+" : "") + (v * 100).toFixed(d) + "%";
+const pp = (v) => v == null ? "–" : (v >= 0 ? "+" : "") + (v * 100).toFixed(2) + " pts";
+const num = (v) => v == null ? "–" : v.toLocaleString(undefined, { maximumSignificantDigits: 6 });
+const sign = (v) => v == null ? "" : v > 0 ? "pos" : v < 0 ? "neg" : "";
+
+function el(tag, props = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === "class") e.className = v; else if (k === "text") e.textContent = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v); else e.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) if (k != null) e.append(k.nodeType ? k : document.createTextNode(k));
+  return e;
+}
+const svgEl = (tag, attrs = {}) => { const e = document.createElementNS("http://www.w3.org/2000/svg", tag); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); return e; };
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || res.statusText);
+  return body;
+}
+
+/* ---------- ratings ---------- */
+const RATING = { Buy: ["up", "▲"], Overweight: ["up", "▲"], Hold: ["flat", "●"], Underweight: ["down", "▼"], Sell: ["down", "▼"], REVIEW: ["flat", "?"] };
+const badge = (rating) => { const [c, i] = RATING[rating] || ["flat", "?"]; return el("span", { class: "badge " + c }, el("span", { "aria-hidden": "true", text: i }), rating); };
+const STATUS = { pending: "◷ waits for next close", filled: "✓ filled", no_trade: "– no trade" };
+
+/* ---------- KPIs ---------- */
+function delta(a, b) { return a == null || b == null ? null : a - b; }
+function renderKpis() {
+  const L = S.lines, vsHold = delta(L.strategy.return, L.hold.return), vsSpy = delta(L.strategy.return, L.spy.return);
+  const tile = (label, value, cls, note) => el("div", { class: "kpi" }, el("div", { class: "label", text: label }), el("div", { class: "value " + (cls || ""), text: value }), el("div", { class: "note", text: note || "" }));
+  const arrow = (v) => v == null ? "" : v > 0 ? "▲ " : v < 0 ? "▼ " : "";
+  $("kpis").replaceChildren(
+    tile("Account value", money(L.strategy.value), "", "Started with " + money(S.starting_cash, 0)),
+    tile("Return", pct(L.strategy.return), sign(L.strategy.return), "Max drawdown " + pct(L.strategy.drawdown)),
+    tile("vs same tickers held", arrow(vsHold) + pp(vsHold), sign(vsHold), "Held: " + pct(L.hold.return) + ". The one to beat."),
+    tile("vs SPY", arrow(vsSpy) + pp(vsSpy), sign(vsSpy), "SPY: " + pct(L.spy.return)),
+    tile("Cash", money(S.cash), "", S.pending + " order" + (S.pending === 1 ? "" : "s") + " waiting to fill"),
+  );
+}
+
+/* ---------- chart ---------- */
+function visibleRange() {
+  const d = S.curve.dates; if (!d.length) return [0, -1];
+  if (!rangeDays) return [0, d.length - 1];
+  const cut = new Date(d[d.length - 1]); cut.setDate(cut.getDate() - rangeDays);
+  let i = d.findIndex((x) => new Date(x) >= cut); if (i < 0) i = 0;
+  return [i, d.length - 1];
+}
+function niceTicks(lo, hi, n = 5) {
+  const span = hi - lo || 1, raw = span / n, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= raw);
+  const out = []; for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) out.push(v);
+  return out;
+}
+function renderChart() {
+  const svg = $("chart"), [i0, i1] = visibleRange(), n = i1 - i0 + 1;
+  svg.replaceChildren(); $("tip").style.display = "none";
+  if (n < 2) { svg.setAttribute("viewBox", "0 0 600 120"); svg.style.height = "120px";
+    const t = svgEl("text", { x: 300, y: 60, "text-anchor": "middle" }); t.textContent = "The chart starts once there is a close after " + S.created + ". Run again after the next session."; svg.append(t); return; }
+  svg.style.height = ""; const W = svg.clientWidth || 700, H = svg.clientHeight || 320;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  const shown = SERIES.filter((s) => !hidden.has(s.id)), m = { l: 56, r: W < 560 ? 12 : 168, t: 12, b: 24 };
+  const vals = shown.flatMap((s) => S.curve[s.id].slice(i0, i1 + 1)).filter((v) => v != null);
+  let lo = Math.min(...vals), hi = Math.max(...vals); const padv = (hi - lo || hi * 0.02) * 0.1; lo -= padv; hi += padv;
+  const x = (i) => m.l + (i - i0) / (n - 1) * (W - m.l - m.r), y = (v) => m.t + (1 - (v - lo) / (hi - lo)) * (H - m.t - m.b);
+  for (const v of niceTicks(lo, hi)) {
+    svg.append(svgEl("line", { x1: m.l, x2: W - m.r, y1: y(v), y2: y(v), stroke: "var(--grid)", "stroke-width": 1 }));
+    const t = svgEl("text", { x: m.l - 8, y: y(v) + 4, "text-anchor": "end" }); t.textContent = money(v, 0); svg.append(t);
+  }
+  svg.append(svgEl("line", { x1: m.l, x2: W - m.r, y1: H - m.b, y2: H - m.b, stroke: "var(--axis)" }));
+  const dates = S.curve.dates; for (const i of [i0, Math.round((i0 + i1) / 2), i1]) {
+    const t = svgEl("text", { x: x(i), y: H - 6, "text-anchor": i === i0 ? "start" : i === i1 ? "end" : "middle" }); t.textContent = dates[i]; svg.append(t);
+  }
+  const ends = [];
+  for (const s of shown) {
+    const pts = []; for (let i = i0; i <= i1; i++) { const v = S.curve[s.id][i]; if (v != null) pts.push([x(i), y(v)]); }
+    svg.append(svgEl("polyline", { points: pts.map((p) => p.join(",")).join(" "), fill: "none", stroke: `var(${s.css})`,
+      "stroke-width": s.id === "strategy" ? 2.5 : 2, "stroke-dasharray": DASH[s.cls], "stroke-linejoin": "round", "stroke-linecap": "round" }));
+    const last = pts[pts.length - 1]; svg.append(svgEl("circle", { cx: last[0], cy: last[1], r: 4, fill: `var(${s.css})`, stroke: "var(--surface)", "stroke-width": 2 }));
+    ends.push({ s, y: last[1], v: S.curve[s.id][i1] });
+  }
+  if (W >= 560) { // direct end labels, nudged apart
+    ends.sort((a, b) => a.y - b.y); for (let k = 1; k < ends.length; k++) ends[k].y = Math.max(ends[k].y, ends[k - 1].y + 28);
+    for (const e of ends) {
+      const g = svgEl("text", { x: W - m.r + 10, y: e.y - 2, class: "lbl" }); g.textContent = e.s.name.replace("Buy & hold, ", "Hold ");
+      const g2 = svgEl("text", { x: W - m.r + 10, y: e.y + 12, class: "lbl", style: "font-weight:600" }); g2.textContent = money(e.v, 0) + " (" + pct(e.v / S.starting_cash - 1, 1) + ")";
+      svg.append(g, g2);
+    }
+  }
+  const cross = svgEl("line", { y1: m.t, y2: H - m.b, stroke: "var(--axis)", "stroke-width": 1, visibility: "hidden" }); svg.append(cross);
+  const dots = shown.map((s) => { const c = svgEl("circle", { r: 4.5, fill: `var(${s.css})`, stroke: "var(--surface)", "stroke-width": 2, visibility: "hidden" }); svg.append(c); return c; });
+  const hit = svgEl("rect", { x: m.l, y: m.t, width: W - m.l - m.r, height: H - m.t - m.b, fill: "transparent", tabindex: "0", "aria-label": "Chart: use left and right arrow keys to read values" }); svg.append(hit);
+  let cur = i1;
+  const show = (i) => {
+    cur = Math.max(i0, Math.min(i1, i)); const px = x(cur); cross.setAttribute("x1", px); cross.setAttribute("x2", px); cross.setAttribute("visibility", "visible");
+    const tip = $("tip"); tip.replaceChildren(el("div", { class: "d", text: dates[cur] }));
+    shown.forEach((s, k) => { const v = S.curve[s.id][cur]; dots[k].setAttribute("cx", px); dots[k].setAttribute("cy", y(v)); dots[k].setAttribute("visibility", "visible");
+      tip.append(el("div", { class: "r" }, el("span", { class: "key " + s.cls, style: `color:var(${s.css})` }), el("span", { text: s.name.replace("Buy & hold, ", "Hold ") }), el("b", { text: money(v, 0) }), el("span", { class: "muted", text: pct(v / S.starting_cash - 1, 1) }))); });
+    tip.style.display = "block"; const wrap = $("chartWrap").getBoundingClientRect(), tw = tip.offsetWidth;
+    tip.style.left = Math.max(4, Math.min(px + 14, wrap.width - tw - 4)) + "px"; tip.style.top = (m.t + 8) + "px";
+  };
+  hit.addEventListener("pointermove", (ev) => { const r = svg.getBoundingClientRect(); show(Math.round(i0 + ((ev.clientX - r.left) * (W / r.width) - m.l) / (W - m.l - m.r) * (n - 1))); });
+  hit.addEventListener("pointerleave", () => { cross.setAttribute("visibility", "hidden"); dots.forEach((d) => d.setAttribute("visibility", "hidden")); $("tip").style.display = "none"; });
+  hit.addEventListener("keydown", (ev) => { if (ev.key === "ArrowLeft") { show(cur - 1); ev.preventDefault(); } if (ev.key === "ArrowRight") { show(cur + 1); ev.preventDefault(); } });
+}
+function renderLegend() {
+  $("legend").replaceChildren(...SERIES.map((s) => el("button", { "aria-pressed": String(!hidden.has(s.id)), title: "Show or hide", onclick: () => {
+    if (hidden.has(s.id)) hidden.delete(s.id); else if (hidden.size < SERIES.length - 1) hidden.add(s.id); renderLegend(); renderChart(); renderCurveTable(); } },
+    el("span", { class: "key " + s.cls, style: `color:var(${s.css})` }), s.name)));
+}
+function renderCurveTable() {
+  const c = S.curve, rows = c.dates.map((d, i) => [d, i]).reverse().slice(0, 400);
+  const shown = SERIES.filter((s) => !hidden.has(s.id));
+  $("curveTable").replaceChildren(el("table", {}, el("thead", {}, el("tr", {}, el("th", { text: "Date" }), shown.map((s) => el("th", { class: "n", text: s.name })))),
+    el("tbody", {}, rows.map(([d, i]) => el("tr", {}, el("td", { text: d }), shown.map((s) => el("td", { class: "n", text: money(c[s.id][i]) })))))));
+}
+
+/* ---------- sections ---------- */
+function renderCalls() {
+  $("callsNote").textContent = S.decided_today.length ? "Analyzed today: " + S.decided_today.join(", ") : "Nothing analyzed for " + S.today + " yet";
+  $("calls").replaceChildren(...S.tickers.map((t) => {
+    const o = S.latest[t]; if (!o) return el("div", { class: "call" }, el("div", { class: "t", text: t }), el("div", { class: "sub", text: "No decision yet." }));
+    const fill = o.status === "filled" ? `${o.shares > 0 ? "Bought" : "Sold"} ${num(Math.abs(o.shares))} @ ${money(o.price)} on ${o.fill_date}` : STATUS[o.status] + (o.note ? " · " + o.note : "");
+    return el("div", { class: "call" }, el("div", { class: "row", style: "justify-content:space-between" }, el("span", { class: "t", text: t }), el("span", { class: "chip", text: o.decision_date })),
+      badge(o.rating), o.summary ? el("p", { text: o.summary }) : null, el("div", { class: "sub", text: fill }),
+      o.has_research ? el("button", { onclick: () => openResearch(t, o.decision_date) }, "Read research") : null);
+  }));
+}
+function table(head, rows, numeric = []) {
+  return el("table", {}, el("thead", {}, el("tr", {}, head.map((h, i) => el("th", { class: numeric.includes(i) ? "n" : "", text: h })))),
+    el("tbody", {}, rows.map((r) => el("tr", {}, r.map((c, i) => el("td", { class: numeric.includes(i) ? "n" : "" }, c))))));
+}
+function renderHoldings() {
+  if (!S.holdings.length) { $("holdings").replaceChildren(el("div", { class: "empty", text: "Flat: nothing held. Cash " + money(S.cash) })); return; }
+  $("holdings").replaceChildren(table(["Ticker", "Shares", "Avg cost", "Last close", "Value", "P&L", "P&L %"],
+    S.holdings.map((h) => [h.ticker, num(h.shares), money(h.avg_cost), money(h.last), money(h.value),
+      el("span", { class: sign(h.pnl) }, (h.pnl > 0 ? "▲ " : h.pnl < 0 ? "▼ " : "") + money(h.pnl)), el("span", { class: sign(h.pnl_pct) }, pct(h.pnl_pct))]), [1, 2, 3, 4, 5, 6]));
+}
+function renderScore() {
+  const sc = S.scored, done = sc ? sc.resolved : 0, goal = S.min_decisions, box = $("score");
+  const kids = [el("div", { class: "row", style: "justify-content:space-between" }, el("span", { text: `${done} of ${goal} decisions scored` }), el("span", { class: "muted", text: sc ? sc.pending + " still inside their holding window" : "" })),
+    el("div", { class: "bar", role: "progressbar", "aria-valuemin": 0, "aria-valuemax": goal, "aria-valuenow": Math.min(done, goal) }, el("i", { style: `width:${Math.min(100, done / goal * 100)}%` }))];
+  kids.push(el("p", { class: "sub", text: done < goal
+    ? "Below " + goal + " scored decisions this is noise, not evidence. Keep running daily, and judge against the same-ticker buy-and-hold line, not against zero."
+    : "Enough decisions to start reading. Judge by alpha against the benchmark and the buy-and-hold gap above, not by whether the account is up." }));
+  if (sc && Object.keys(sc.by_rating).length) {
+    kids.push(el("div", { class: "scroll" }, table(["Rating", "Scored", "Called direction", "Mean alpha vs benchmark"],
+      Object.entries(sc.by_rating).map(([r, v]) => [badge(r), String(v.count), v.hit_rate == null ? "no direction claimed" : (v.hit_rate * 100).toFixed(0) + "%", el("span", { class: sign(v.mean_alpha) }, pct(v.mean_alpha, 1))]), [1, 2, 3])));
+    kids.push(el("p", { class: "sub", text: "Alpha is measured over " + sc.holding + " from the first close after each decision." }));
+  }
+  box.replaceChildren(...kids);
+}
+function renderOrders() {
+  const sel = $("ordFilter"), f = sel.value || "all";
+  sel.replaceChildren(el("option", { value: "all", text: "All" }), ...S.tickers.map((t) => el("option", { value: t, text: t }))); sel.value = S.tickers.includes(f) ? f : "all";
+  const all = S.orders.filter((o) => sel.value === "all" || o.ticker === sel.value), rows = all.slice(0, orderLimit);
+  $("orders").replaceChildren(rows.length ? table(["Decided", "Ticker", "Rating", "Status", "Filled", "Shares", "Price", ""],
+    rows.map((o) => [o.decision_date, o.ticker, badge(o.rating), STATUS[o.status] + (o.note && o.status !== "filled" ? " · " + o.note : ""), o.fill_date || "–",
+      o.status === "filled" ? num(o.shares) : "–", o.status === "filled" ? money(o.price) : "–",
+      o.has_research ? el("button", { class: "link", onclick: () => openResearch(o.ticker, o.decision_date) }, "Research") : ""]), [5, 6])
+    : el("div", { class: "empty", text: "No decisions yet. Use Run analysis after the market closes." }),
+    all.length > rows.length ? el("div", { class: "row", style: "margin-top:12px" }, el("button", { onclick: () => { orderLimit += 25; renderOrders(); } }, `Show more (${all.length - rows.length} older)`)) : null);
+}
+
+/* ---------- research dialog ---------- */
+async function openResearch(ticker, date) {
+  const dlg = $("dlg"); $("dlgTitle").textContent = ticker + " · " + date; $("dlgSub").textContent = "Loading research…";
+  $("tabs").replaceChildren(); $("dbody").replaceChildren(); if (!dlg.open) dlg.showModal();
+  try {
+    const r = await api(`/api/research?ticker=${encodeURIComponent(ticker)}&date=${encodeURIComponent(date)}`);
+    const s = r.settings || {}, models = [s.deep_think_llm, s.quick_think_llm].filter(Boolean).join(" / ");
+    $("dlgSub").replaceChildren(badge(r.rating || "REVIEW"), " ", models ? "· models " + models : "");
+    const draw = (k) => { [...$("tabs").children].forEach((b, j) => b.setAttribute("aria-pressed", String(j === k)));
+      const body = $("dbody"); body.replaceChildren(...r.sections[k].items.flatMap((it) => [el("h3", { text: it.agent }), Object.assign(el("div"), { innerHTML: it.html })]));
+      body.querySelectorAll("a").forEach((a) => { a.target = "_blank"; a.rel = "noopener noreferrer"; }); body.scrollTop = 0; dlg.scrollTop = 0; };
+    // Lead with the Portfolio Manager's decision, then work back through the pipeline.
+    const order = r.sections.map((_, i) => i).sort((a, b) => (/Portfolio/.test(r.sections[b].heading) ? 1 : 0) - (/Portfolio/.test(r.sections[a].heading) ? 1 : 0));
+    r.sections = order.map((i) => r.sections[i]);
+    $("tabs").replaceChildren(...r.sections.map((sec, k) => el("button", { role: "tab", "aria-pressed": "false", onclick: () => draw(k), text: sec.heading.replace(/^[IVX]+\.\s*/, "") })));
+    if (r.sections.length) draw(0); else $("dbody").append(el("p", { text: "This run saved no sections." }));
+  } catch (e) { $("dlgSub").textContent = ""; $("dbody").replaceChildren(el("p", { class: "neg", text: e.message })); }
+}
+
+/* ---------- run ---------- */
+function banner(text, cls, log) {
+  const b = $("banner"); b.hidden = !text; b.className = "banner " + (cls || ""); b.replaceChildren(...[text || "", log && log.length ? el("div", { class: "log", text: log.join("\n") }) : null].filter((x) => x != null));
+}
+function renderRun(r) {
+  const btn = $("runBtn");
+  if (r.state === "running") { btn.disabled = true; btn.textContent = "Running…"; banner(`Analyzing for ${r.date}. This calls your LLM provider and takes several minutes per ticker.`, "", r.log); return true; }
+  btn.disabled = false; btn.textContent = "Run analysis";
+  if (r.state === "error") banner("Run failed: " + r.error, "error");
+  else if (r.state === "done") { const x = r.result; banner(`${x.date}: filled ${x.filled} earlier decision(s); decided ${x.decided.map((d) => d.join(" ")).join(", ") || "nothing new"}` + (x.skipped.length ? `; already done: ${x.skipped.join(", ")}` : "") + (x.failures.length ? `. Failed: ${x.failures.map((f) => f[0] + " (" + f[1] + ")").join("; ")}` : "."), x.failures.length ? "error" : ""); }
+  else hint();
+  return false;
+}
+function hint() {
+  if (!S) return; const dow = new Date(S.today + "T12:00:00").getDay(), weekend = dow === 0 || dow === 6;
+  const missing = S.tickers.filter((t) => !S.decided_today.includes(t));
+  banner(missing.length && !weekend ? `Not analyzed for ${S.today}: ${missing.join(", ")}. Run it after the close; it fills at tomorrow’s close.` : "");
+}
+async function poll() {
+  clearTimeout(pollTimer);
+  try { const r = await api("/api/run"); if (renderRun(r)) pollTimer = setTimeout(poll, 2000); else if (r.state === "done" || r.state === "error") await load(true); }
+  catch (e) { banner("Lost contact with the dashboard server: " + e.message, "error"); }
+}
+async function startRun() {
+  const date = $("runDate").value, n = S.tickers.length;
+  if (!confirm(`Analyze ${S.tickers.join(", ")} for ${date}?\n\nThis makes ${n} full multi-agent run${n > 1 ? "s" : ""} against your LLM provider and uses tokens. Nothing is traded.`)) return;
+  try { await api("/api/run", { method: "POST", headers: { "Content-Type": "application/json", "X-Dashboard-Token": TOKEN }, body: JSON.stringify({ date }) }); poll(); }
+  catch (e) { banner(e.message, "error"); }
+}
+
+/* ---------- boot ---------- */
+function render() {
+  $("title").textContent = "Paper account · " + S.name;
+  $("sub").textContent = `${S.tickers.join(", ")} · started ${S.created} with ${money(S.starting_cash, 0)} · slippage ${S.slippage_bps} bps · prices as of ${S.as_of || "no close yet"}`;
+  const d = $("runDate"); d.min = S.created; d.max = S.today; if (!d.value) d.value = S.today;
+  renderKpis(); renderLegend(); renderChart(); renderCurveTable(); renderCalls(); renderHoldings(); renderScore(); renderOrders();
+}
+async function load(refresh) {
+  $("chart").classList.add("loading");
+  try { S = await api("/api/state" + (refresh ? "?refresh=1" : "")); render(); }
+  catch (e) { banner("Could not load the account: " + e.message, "error"); }
+  $("chart").classList.remove("loading");
+}
+$("runBtn").addEventListener("click", startRun);
+$("dlgClose").addEventListener("click", () => $("dlg").close());
+$("dlg").addEventListener("click", (e) => { if (e.target === $("dlg")) $("dlg").close(); });
+$("ordFilter").addEventListener("change", () => { orderLimit = 20; renderOrders(); });
+$("ranges").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; rangeDays = +b.dataset.days; [...$("ranges").children].forEach((x) => x.classList.toggle("on", x === b)); renderChart(); });
+$("tableToggle").addEventListener("click", (e) => { const on = e.target.getAttribute("aria-pressed") !== "true"; e.target.setAttribute("aria-pressed", String(on)); $("curveTable").hidden = !on; $("chartWrap").hidden = on; $("ranges").hidden = on; });
+let rz; window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => S && renderChart(), 120); });
+(async () => { await load(false); poll(); })();
+</script>
+</body>
+</html>

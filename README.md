@@ -382,6 +382,38 @@ tradingagents backtest NVDA,AAPL --start 2026-06-01 --end 2026-08-01 --every 7
 
 Each cell is scored on realized alpha against the instrument's regional benchmark, grouped by rating. A decision is entered at the first close after its date, because a run reads news published after that day's close. Your own memory log is never written to, and re-running the same grid with `run_id=result.run_id` skips the cells that already ran, so an interrupted sweep continues where it stopped.
 
+## Paper trading
+
+A backtest over past dates cannot tell you whether the system has an edge: the models were trained on those dates, so they may already know what happened. Paper trading forward in time can, because every decision is made before its outcome exists. It is a local simulated account: no broker, no keys, and nothing is ever sent to an exchange.
+
+```bash
+tradingagents paper init main NVDA,AAPL,MSFT --cash 10000   # once; tickers are fixed for the account
+tradingagents paper run main                                # after each close
+tradingagents paper status main
+```
+
+`run` fills the earlier decisions, then analyzes every ticker for the day against the account's actual fills, so the trader and portfolio manager size against what the account holds. A decision dated D fills at the first close after D, the same entry the memory log scores. The execution rules (long-only, equal sleeves per ticker, a stated sleeve fraction per rating, a no-trade band, slippage) are written out at the top of `tradingagents/paper/account.py`; change them there, not in your reading of the results.
+
+`status` compares the account with buy-and-hold of the same tickers and with SPY, plus the per-rating alpha from the account's own memory log. Judge it against buy-and-hold, not against zero: a long-only account in rising names beats cash whether or not the agents add anything. Under 30 scored decisions the figures are noise, and the report says so.
+
+### Daily dashboard
+
+```bash
+tradingagents paper dashboard main        # opens http://127.0.0.1:8765
+```
+
+One page for the daily routine: account value against buy-and-hold of the same tickers and SPY, the latest call per ticker, holdings, every decision and fill, and a progress bar toward the 30 scored decisions it takes before the results mean anything. "Read research" opens the full run behind a decision (Portfolio Manager decision, analyst reports, bull/bear debate, trader plan, risk debate) from the state log the run already saved. **Run analysis** starts the day's analysis in the background, after a confirmation, since it makes one full multi-agent run per ticker against your LLM provider.
+
+It listens on 127.0.0.1 only and has no login. The Run route needs a token that only the served page carries and refuses requests whose Host header is not this server, so a web page you happen to have open cannot start a run. Do not put it behind a tunnel or reverse proxy.
+
+### Daily schedule
+
+```bash
+tradingagents paper run main --trading-days-only
+```
+
+Schedule that one command after the US close. It uses New York's date, does nothing on weekends and market holidays, skips tickers it has already decided, exits non-zero when a ticker failed (so the next trigger retries it), and never overlaps a run from the dashboard. Each attempt is logged to `runs.log` beside the account. Authentication stays on your computer. Setup for macOS, Linux and Windows, and what a missed day means, is in [docs/paper-schedule.md](docs/paper-schedule.md).
+
 ## Reproducibility
 
 TradingAgents is LLM-driven, so two runs of the same ticker and date can differ. This is expected for a research tool built on language models, not a defect. The variation comes from a few distinct sources, and it helps to separate them.
