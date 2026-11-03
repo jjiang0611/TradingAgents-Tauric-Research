@@ -396,6 +396,16 @@ tradingagents paper status main
 
 `status` compares the account with buy-and-hold of the same tickers and with SPY, plus the per-rating alpha from the account's own memory log. Judge it against buy-and-hold, not against zero: a long-only account in rising names beats cash whether or not the agents add anything. Under 30 scored decisions the figures are noise, and the report says so.
 
+### Daily dashboard
+
+```bash
+tradingagents paper dashboard main        # opens http://127.0.0.1:8765
+```
+
+One page for the daily routine: account value against buy-and-hold of the same tickers and SPY, the latest call per ticker, holdings, every decision and fill, and a progress bar toward the 30 scored decisions it takes before the results mean anything. "Read research" opens the full run behind a decision (Portfolio Manager decision, analyst reports, bull/bear debate, trader plan, risk debate) from the state log the run already saved. **Run analysis** starts the day's analysis in the background, after a confirmation, since it makes one full multi-agent run per ticker against your LLM provider.
+
+It listens on 127.0.0.1 only and has no login. The Run route needs a token that only the served page carries and refuses requests whose Host header is not this server, so a web page you happen to have open cannot start a run. Do not put it behind a tunnel or reverse proxy.
+
 ## Reproducibility
 
 TradingAgents is LLM-driven, so two runs of the same ticker and date can differ. This is expected for a research tool built on language models, not a defect. The variation comes from a few distinct sources, and it helps to separate them.

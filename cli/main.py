@@ -238,6 +238,35 @@ def paper_status(name: str = typer.Argument(..., help="Account name")):
         raise typer.Exit(code=1) from None
 
 
+@paper_app.command("dashboard")
+def paper_dashboard(
+    name: str = typer.Argument(..., help="Account name"),
+    port: int = typer.Option(8765, "--port", help="Local port; the server only listens on 127.0.0.1"),
+    open_browser: bool = typer.Option(True, "--open/--no-open", help="Open the dashboard in your browser"),
+):
+    """Serve the account, its research and a Run button on http://127.0.0.1."""
+    import webbrowser
+
+    from tradingagents.paper.dashboard import make_server
+
+    _paper_account(name)
+    try:
+        server = make_server(DEFAULT_CONFIG, name, port=port)
+    except OSError as exc:
+        console.print(f"[red]Cannot listen on port {port}: {exc}. Try --port.[/red]")
+        raise typer.Exit(code=1) from None
+    url = f"http://127.0.0.1:{server.server_address[1]}/"
+    console.print(f"Dashboard for {name!r}: {url}  (Ctrl+C to stop)")
+    if open_browser:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        console.print("\nStopped.")
+    finally:
+        server.server_close()
+
+
 # The plans `login` and `logout` take: the providers signed in to, not keyed.
 Plan = StrEnum("Plan", {name: name for name in SIGNED_IN_PROVIDERS})
 
