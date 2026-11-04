@@ -414,6 +414,18 @@ tradingagents paper run main --trading-days-only
 
 Schedule that one command after the US close. It uses New York's date, does nothing on weekends and market holidays, skips tickers it has already decided, exits non-zero when a ticker failed (so the next trigger retries it), and never overlaps a run from the dashboard. Each attempt is logged to `runs.log` beside the account. Authentication stays on your computer. Setup for macOS, Linux and Windows, and what a missed day means, is in [docs/paper-schedule.md](docs/paper-schedule.md).
 
+### Market-neutral pairs mode
+
+```bash
+tradingagents paper pairs init pairs KO/PEP,XOM/CVX,JPM/BAC --cash 10000   # once; the pairs are fixed
+tradingagents paper pairs run pairs                                        # any time, as often as you like
+tradingagents paper pairs status pairs
+```
+
+A second kind of paper account that does not use the agents: a systematic pairs trade that shorts the stock that ran ahead and buys its laggard partner. It holds a simulated short leg, which the long-only account cannot. The rules (a 252-session z-score of the log spread, enter beyond 2, exit inside 0.5, stop at 4, 60-session limit, decisions filled at the next close, slippage and a borrow fee) are fixed when the account is created and written out at the top of `tradingagents/paper/pairs.py`. Nothing depends on news, so a day your computer missed is replayed exactly the next time you run it.
+
+Read this before expecting anything from it: the same rules, run on 1990-2022 prices for eight sector pairs with a one-day lag and 5 bps per side, earned about +0.2% a year after costs (Sharpe 0.08), and nothing in 2013-2022. This mode exists to test that result forward, not to promise a profit. Roughly half the trades in that test were stopped out. At about three trades per pair a year, thirty closed trades take years, and `status` says so. It reports beta to SPY (a neutral book should sit near 0) and says to judge the result against cash. The short leg is simulated: no borrow availability, no margin, and your broker may not allow shorting at all.
+
 ## Reproducibility
 
 TradingAgents is LLM-driven, so two runs of the same ticker and date can differ. This is expected for a research tool built on language models, not a defect. The variation comes from a few distinct sources, and it helps to separate them.

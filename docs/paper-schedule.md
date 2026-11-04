@@ -107,6 +107,14 @@ schtasks /Create /TN "TradingAgents Paper" /SC DAILY /ST 17:05 /RI 120 /DU 04:30
   /TR "cmd /c cd /d C:\path\to\TradingAgents-Tauric-Research && .venv\Scripts\tradingagents.exe paper run main --trading-days-only >> %USERPROFILE%\tradingagents-paper.log 2>&1"
 ```
 
+## Pairs accounts
+
+```bash
+tradingagents paper pairs run pairs
+```
+
+Schedule it the same way: put it in place of `paper run main --trading-days-only` in whichever scheduler file above you use, once a day after the close. It needs no `--trading-days-only`: it handles every completed session since the last run and does nothing when there is none. Because it is deterministic, **a missed day is not lost**: the next run replays it and reaches the decisions a daily run would have made. That is the opposite of the LLM account above, so a laptop that is often asleep suits this mode far better. Both modes share a `runs.log` and never overlap a run on the same account.
+
 ## Checking that it works
 
 Run the command once by hand first, from the same folder the scheduler uses, outside market hours if you like:

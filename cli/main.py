@@ -288,6 +288,92 @@ def paper_dashboard(
         server.server_close()
 
 
+pairs_app = typer.Typer(
+    help="Market-neutral pairs paper trading: no LLM, a simulated short leg, rules fixed at creation.",
+    no_args_is_help=True,
+)
+paper_app.add_typer(pairs_app, name="pairs")
+
+
+def _pairs_account(name: str):
+    from tradingagents.paper.pairs import PairsAccount
+    from tradingagents.paper.pairs_runner import pairs_path
+
+    path = pairs_path(DEFAULT_CONFIG, name)
+    if not path.is_file():
+        console.print(f"[red]No pairs account {name!r}. Create it with: tradingagents paper pairs init {name} KO/PEP,XOM/CVX[/red]")
+        raise typer.Exit(code=1)
+    try:
+        return PairsAccount.load(path)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+
+@pairs_app.command("init")
+def pairs_init(
+    name: str = typer.Argument(..., help="Name for the account, e.g. pairs"),
+    pairs: str = typer.Argument(..., help="Comma-separated pairs, e.g. KO/PEP,XOM/CVX; fixed for the account"),
+    cash: float = typer.Option(10_000.0, "--cash", help="Starting capital, split equally across the pairs as gross exposure"),
+    slippage_bps: float = typer.Option(5.0, "--slippage-bps", help="Adverse price move applied to every fill"),
+    borrow: float = typer.Option(0.005, "--borrow", help="Yearly borrow fee on the short leg, as a fraction (0.005 = 0.5%)"),
+):
+    """Create a pairs account. The trading rules are fixed here and cannot be changed later."""
+    from tradingagents.paper.pairs_runner import create_pairs_account
+
+    names = [p.strip().upper() for p in pairs.split(",") if p.strip()]
+    try:
+        account = create_pairs_account(DEFAULT_CONFIG, name, names, cash, slippage_bps, borrow)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    console.print(f"Created pairs account {account.name!r}: ${account.starting_cash:,.0f} over "
+                  f"{', '.join(account.pairs)} (${account.sleeve:,.0f} gross each).")
+    console.print(f"Run it after each close with: tradingagents paper pairs run {account.name}")
+
+
+@pairs_app.command("run")
+def pairs_run(name: str = typer.Argument(..., help="Account name")):
+    """Handle every completed session since the last run: fills, then new decisions.
+
+    Safe to run any time and as often as you like. A missed day is replayed exactly,
+    because nothing here depends on news or an LLM.
+    """
+    from tradingagents.paper import runner as paper
+    from tradingagents.paper.pairs_runner import run_pairs
+
+    account = _pairs_account(name)
+    try:
+        result = run_pairs(account, DEFAULT_CONFIG)
+    except paper.RunInProgress as exc:
+        paper.log_run(DEFAULT_CONFIG, name, f"pairs skipped: {exc}")
+        console.print(f"[yellow]{exc}[/yellow]")
+        return
+    except Exception as exc:  # unreachable prices are a failed run, to be retried
+        paper.log_run(DEFAULT_CONFIG, name, f"pairs error: {exc}")
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    for line in result.events:
+        console.print(line)
+    summary = f"pairs: {len(result.events)} decision(s) or fill(s)" if result.events else "pairs: no new sessions to handle"
+    console.print(summary)
+    for pair in result.short_history:
+        console.print(f"[yellow]no signals yet for {pair}: not enough price history[/yellow]")
+    paper.log_run(DEFAULT_CONFIG, name, summary)
+
+
+@pairs_app.command("status")
+def pairs_status_command(name: str = typer.Argument(..., help="Account name")):
+    """Show each pair, the account against SPY, and the closed-trade record."""
+    from tradingagents.paper.pairs_runner import pairs_status
+
+    try:
+        console.print(pairs_status(_pairs_account(name)).render(), markup=False, highlight=False)
+    except Exception as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+
 # The plans `login` and `logout` take: the providers signed in to, not keyed.
 Plan = StrEnum("Plan", {name: name for name in SIGNED_IN_PROVIDERS})
 
