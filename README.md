@@ -426,6 +426,24 @@ A second kind of paper account that does not use the agents: a systematic pairs 
 
 Read this before expecting anything from it: the same rules, run on 1990-2022 prices for eight sector pairs with a one-day lag and 5 bps per side, earned about +0.2% a year after costs (Sharpe 0.08), and nothing in 2013-2022. This mode exists to test that result forward, not to promise a profit. Roughly half the trades in that test were stopped out. At about three trades per pair a year, thirty closed trades take years, and `status` says so. It reports beta to SPY (a neutral book should sit near 0) and says to judge the result against cash. The short leg is simulated: no borrow availability, no margin, and your broker may not allow shorting at all.
 
+#### Trying the pairs trades on Alpaca paper
+
+The simulation assumes a fill at the next close with 5 bps of slippage. To see what real fills do, mirror the decisions to an [Alpaca](https://alpaca.markets) **paper** account (simulated money; create the paper keys in Alpaca's dashboard). Put them in `.env`:
+
+```
+ALPACA_PAPER_API_KEY=...
+ALPACA_PAPER_API_SECRET=...
+```
+
+```bash
+tradingagents paper pairs alpaca account            # check the keys and the paper account
+tradingagents paper pairs alpaca send pairs         # dry run: prints the orders, sends nothing
+tradingagents paper pairs alpaca send pairs --send  # a few minutes before the close: market-on-close orders
+tradingagents paper pairs alpaca reconcile pairs    # after the close: real fills vs the simulation
+```
+
+The simulated ledger stays the source of every decision; `send` mirrors the decisions awaiting today's close, and `reconcile` reports each fill's cost against the official close (the simulation assumes 5 bps) and flags positions that do not match what was sent. Paper only by construction: the client can only reach `paper-api.alpaca.markets`, nothing is sent without `--send`, orders are whole-share (Alpaca does not take fractional shorts) and capped in dollars, and a decision is never sent twice or after its session has passed. Schedule `send` at about 15:30 New York time on trading days and `run` then `reconcile` in the evening; see `docs/paper-schedule.md`. This was written from Alpaca's documentation and tested against fakes only: read a dry run, and send a first day's orders while watching your paper dashboard, before trusting it.
+
 ## Reproducibility
 
 TradingAgents is LLM-driven, so two runs of the same ticker and date can differ. This is expected for a research tool built on language models, not a defect. The variation comes from a few distinct sources, and it helps to separate them.

@@ -374,6 +374,128 @@ def pairs_status_command(name: str = typer.Argument(..., help="Account name")):
         raise typer.Exit(code=1) from None
 
 
+alpaca_app = typer.Typer(
+    help="Mirror a pairs account to your Alpaca PAPER account and measure the fills. Paper only.",
+    no_args_is_help=True,
+)
+pairs_app.add_typer(alpaca_app, name="alpaca")
+
+
+def _alpaca_context(name: str):
+    from tradingagents.paper import alpaca
+
+    account = _pairs_account(name)
+    try:
+        return account, alpaca.AlpacaPaper()
+    except alpaca.AlpacaError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+
+@alpaca_app.command("account")
+def alpaca_account():
+    """Show the paper account the keys point at: status, equity, buying power, positions."""
+    from tradingagents.paper import alpaca
+
+    try:
+        broker = alpaca.AlpacaPaper()
+        info, held = broker.account(), broker.positions()
+    except alpaca.AlpacaError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    number = str(info.get("account_number", ""))
+    console.print(f"Paper account ...{number[-4:]}: {info.get('status')} · equity ${float(info.get('equity') or 0):,.2f} · "
+                  f"buying power ${float(info.get('buying_power') or 0):,.2f} · shorting enabled: {info.get('shorting_enabled')}",
+                  markup=False, highlight=False)
+    for p in held:
+        console.print(f"  {p['symbol']}: {p['qty']} @ {p.get('avg_entry_price')}", markup=False, highlight=False)
+    if not held:
+        console.print("  no open positions")
+
+
+@alpaca_app.command("send")
+def alpaca_send(
+    name: str = typer.Argument(..., help="Pairs account name"),
+    send: bool = typer.Option(False, "--send", help="Actually submit the orders to the paper account. Without it this is a dry run."),
+    tif: str = typer.Option("cls", "--tif", help="cls (market on close, matches the simulation) or day (fills now)"),
+    max_order_usd: float = typer.Option(None, "--max-order-usd", help="Refuse any leg above this many dollars; default is one pair's capital"),
+    max_gross_usd: float = typer.Option(None, "--max-gross-usd", help="Refuse to open beyond this much gross exposure; default is the account's starting cash"),
+):
+    """Send the decisions awaiting today's close to Alpaca paper. Run it a few minutes before the close."""
+    from tradingagents.dataflows.files import locked
+    from tradingagents.paper import alpaca, runner as paper
+    from tradingagents.paper.pairs_runner import fetch_pairs_closes
+
+    if tif not in ("cls", "day"):
+        console.print("[red]--tif must be cls or day[/red]")
+        raise typer.Exit(code=1)
+    account, broker = _alpaca_context(name)
+    path = alpaca.mirror_path(DEFAULT_CONFIG, name)
+    try:
+        with locked(path, wait=False) as held:
+            if not held:
+                console.print("[yellow]another alpaca command is running for this account[/yellow]")
+                return
+            if send:
+                alpaca.check_market(broker, tif)
+            closes = fetch_pairs_closes(account)
+            account.process(closes)                          # in memory: a missed evening run must not hide a decision
+            mirror = alpaca.Mirror.load(path)
+            if mirror.orders:
+                alpaca.reconcile(account, broker, mirror, path, closes)    # so an exit knows what filled
+            plan = alpaca.plan_orders(account, closes, mirror, tif, max_order_usd, max_gross_usd)
+            for line in plan.skipped:
+                console.print(f"[dim]skipped: {line}[/dim]")
+            if not plan.orders:
+                console.print("Nothing to send.")
+                return
+            console.print(f"{'SENDING' if send else 'DRY RUN, nothing sent'} to Alpaca PAPER:", markup=False)
+            for o in plan.orders:
+                console.print(f"  {o.pair} {o.action}: {o.side} {o.qty} {o.symbol} ({o.tif}) ~${o.notional:,.0f}", markup=False, highlight=False)
+            if not send:
+                console.print("Add --send to submit these.")
+                return
+            result = alpaca.send_plan(broker, plan, mirror, path)
+    except alpaca.AlpacaError as exc:
+        paper.log_run(DEFAULT_CONFIG, name, f"alpaca send error: {exc}")
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    for o in result.sent:
+        console.print(f"  submitted {o.side} {o.qty} {o.symbol}: {o.status}", markup=False)
+    for line in result.refused:
+        console.print(f"[yellow]refused: {line}[/yellow]")
+    paper.log_run(DEFAULT_CONFIG, name, f"alpaca send: {len(result.sent)} submitted, {len(result.refused)} refused")
+    if result.refused:
+        raise typer.Exit(code=1)
+
+
+@alpaca_app.command("reconcile")
+def alpaca_reconcile(name: str = typer.Argument(..., help="Pairs account name")):
+    """Pull the fills from Alpaca and compare them with the simulation. Run it after the close."""
+    from tradingagents.dataflows.files import locked
+    from tradingagents.paper import alpaca
+    from tradingagents.paper.pairs_runner import fetch_pairs_closes
+
+    account, broker = _alpaca_context(name)
+    path = alpaca.mirror_path(DEFAULT_CONFIG, name)
+    try:
+        with locked(path, wait=False) as held:
+            if not held:
+                console.print("[yellow]another alpaca command is running for this account[/yellow]")
+                return
+            mirror = alpaca.Mirror.load(path)
+            if not mirror.orders:
+                console.print("No orders were sent yet.")
+                return
+            closes = fetch_pairs_closes(account)
+            account.process(closes)
+            report = alpaca.reconcile(account, broker, mirror, path, closes)
+    except alpaca.AlpacaError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    console.print(report.render(), markup=False, highlight=False)
+
+
 # The plans `login` and `logout` take: the providers signed in to, not keyed.
 Plan = StrEnum("Plan", {name: name for name in SIGNED_IN_PROVIDERS})
 
