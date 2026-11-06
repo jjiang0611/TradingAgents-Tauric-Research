@@ -107,6 +107,33 @@ schtasks /Create /TN "TradingAgents Paper" /SC DAILY /ST 17:05 /RI 120 /DU 04:30
   /TR "cmd /c cd /d C:\path\to\TradingAgents-Tauric-Research && .venv\Scripts\tradingagents.exe paper run main --trading-days-only >> %USERPROFILE%\tradingagents-paper.log 2>&1"
 ```
 
+## Pairs accounts
+
+```bash
+tradingagents paper pairs run pairs
+```
+
+Schedule it the same way: put it in place of `paper run main --trading-days-only` in whichever scheduler file above you use, once a day after the close. It needs no `--trading-days-only`: it handles every completed session since the last run and does nothing when there is none. Because it is deterministic, **a missed day is not lost**: the next run replays it and reaches the decisions a daily run would have made. That is the opposite of the LLM account above, so a laptop that is often asleep suits this mode far better. Both modes share a `runs.log` and never overlap a run on the same account.
+
+## Alpaca paper (optional)
+
+If you mirror a pairs account to Alpaca paper, two more jobs, on trading days only (a closed market makes `send` refuse harmlessly):
+
+| When (New York) | Command | Why |
+|---|---|---|
+| 15:30 | `tradingagents paper pairs alpaca send pairs --send` | market-on-close orders must reach Alpaca before about 3:45-3:50 pm; the decisions it sends were made at last night's close |
+| 17:05 | `tradingagents paper pairs run pairs`, then `tradingagents paper pairs alpaca reconcile pairs` | the simulation fills at today's close, then the real fills are compared with it |
+
+`send` works from the ledger in memory, so a missed evening `run` does not hide a decision. A decision whose session has already passed is skipped as stale rather than sent late. In cron:
+
+```cron
+CRON_TZ=America/New_York
+30 15 * * 1-5 cd /path/to/TradingAgents-Tauric-Research && .venv/bin/tradingagents paper pairs alpaca send pairs --send >> "$HOME/tradingagents-alpaca.log" 2>&1
+5 17 * * 1-5 cd /path/to/TradingAgents-Tauric-Research && .venv/bin/tradingagents paper pairs run pairs && .venv/bin/tradingagents paper pairs alpaca reconcile pairs >> "$HOME/tradingagents-alpaca.log" 2>&1
+```
+
+The same two commands go into launchd, systemd or Task Scheduler as above. Keep your laptop awake for the 15:30 job: unlike `run`, a missed `send` cannot be replayed, because the decision goes stale at the next close.
+
 ## Checking that it works
 
 Run the command once by hand first, from the same folder the scheduler uses, outside market hours if you like:
