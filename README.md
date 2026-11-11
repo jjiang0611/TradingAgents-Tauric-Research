@@ -437,10 +437,13 @@ ALPACA_PAPER_API_SECRET=...
 
 ```bash
 tradingagents paper pairs alpaca account            # check the keys and the paper account
+tradingagents paper pairs alpaca test-order --send  # market hours: buy and sell back 1 share of SPY to prove the order path
 tradingagents paper pairs alpaca send pairs         # dry run: prints the orders, sends nothing
 tradingagents paper pairs alpaca send pairs --send  # a few minutes before the close: market-on-close orders
 tradingagents paper pairs alpaca reconcile pairs    # after the close: real fills vs the simulation
 ```
+
+`test-order` needs no strategy signal: it buys a few shares of a liquid ticker on paper and sells them straight back, then prints both fills and what the round trip cost (use `--keep` to leave the shares, `--qty` for 1 to 10 shares, no `--send` for a dry run). Run it first: it is the quickest proof that your keys, the paper account and the order path work.
 
 The simulated ledger stays the source of every decision; `send` mirrors the decisions awaiting today's close, and `reconcile` reports each fill's cost against the official close (the simulation assumes 5 bps) and flags positions that do not match what was sent. Paper only by construction: the client can only reach `paper-api.alpaca.markets`, nothing is sent without `--send`, orders are whole-share (Alpaca does not take fractional shorts) and capped in dollars, and a decision is never sent twice or after its session has passed. Schedule `send` at about 15:30 New York time on trading days and `run` then `reconcile` in the evening; see `docs/paper-schedule.md`. This was written from Alpaca's documentation and tested against fakes only: read a dry run, and send a first day's orders while watching your paper dashboard, before trusting it.
 

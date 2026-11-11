@@ -335,3 +335,108 @@ def test_the_cli_refuses_to_send_when_the_market_is_closed_and_without_keys(cli_
 
     monkeypatch.setattr(alpaca, "AlpacaPaper", no_keys)
     assert CLI.invoke(app, ["paper", "pairs", "alpaca", "send", "pp"]).exit_code == 1
+
+
+# ---------- the one-shot plumbing check (test-order) ----------
+
+class AutoBroker(FakeBroker):
+    """Fills each order at once, at a price per side, unless told a side never fills."""
+
+    def __init__(self, buy=100.0, sell=99.95, fills=("buy", "sell")):
+        super().__init__()
+        self.prices, self.fills_for, self.sides = {"buy": buy, "sell": sell}, set(fills), {}
+
+    def submit_order(self, symbol, qty, side, tif, cid):
+        response = super().submit_order(symbol, qty, side, tif, cid)
+        self.sides[cid] = (side, qty)
+        return response
+
+    def order_by_client_id(self, cid):
+        side, qty = self.sides[cid]
+        if side in self.fills_for:
+            return {"id": f"id-{cid}", "status": "filled", "filled_qty": str(qty), "filled_avg_price": str(self.prices[side])}
+        return {"id": f"id-{cid}", "status": "accepted"}
+
+
+def ticking():
+    count = iter(range(0, 10_000, 10))
+    return {"sleep": lambda s: None, "clock": lambda: next(count)}
+
+
+@pytest.mark.unit
+def test_a_test_order_is_a_dry_run_unless_sent():
+    broker = AutoBroker()
+    result = alpaca.run_test_order(broker, "spy", 2)
+    assert result.ok and broker.calls == [] and "DRY RUN" in result.lines[-1] and "sell 2 SPY" in result.lines[-1]
+
+
+@pytest.mark.unit
+def test_a_sent_test_order_buys_then_sells_back_and_reports_the_round_trip_cost():
+    broker = AutoBroker(buy=100.0, sell=99.90)
+    result = alpaca.run_test_order(broker, "SPY", 2, send=True, stamp="T1", **ticking())
+    assert result.ok
+    assert [(c[0], c[1], c[2], c[3], c[4]) for c in broker.calls] == [
+        ("SPY", 2, "buy", "day", "ta-test-T1-SPY-buy"), ("SPY", 2, "sell", "day", "ta-test-T1-SPY-sell")]
+    assert "Round trip cost $+0.20 (+10.0 bps)" in result.lines[-1]
+
+
+@pytest.mark.unit
+def test_keep_leaves_the_position_open_and_says_so():
+    broker = AutoBroker()
+    result = alpaca.run_test_order(broker, "SPY", 1, send=True, keep=True, stamp="T2", **ticking())
+    assert result.ok and [c[2] for c in broker.calls] == ["buy"] and "left open" in result.lines[-1]
+
+
+@pytest.mark.unit
+def test_a_buy_that_never_fills_is_cancelled_and_nothing_is_sold():
+    broker = AutoBroker(fills=())
+    result = alpaca.run_test_order(broker, "SPY", 1, send=True, stamp="T3", **ticking())
+    assert not result.ok and [c[2] for c in broker.calls] == ["buy"] and len(broker.canceled) == 1
+    assert "nothing was sold" in result.lines[-1]
+
+
+@pytest.mark.unit
+def test_a_sell_that_never_fills_tells_you_the_position_is_still_open():
+    broker = AutoBroker(fills=("buy",))
+    result = alpaca.run_test_order(broker, "SPY", 3, send=True, stamp="T4", **ticking())
+    assert not result.ok and "you still hold 3 SPY" in result.lines[-1]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kwargs, message", [
+    ({"qty": 0}, "1 to 10"), ({"qty": 11}, "1 to 10"), ({"symbol": "../x"}, "does not look like a ticker"),
+])
+def test_a_test_order_refuses_silly_inputs(kwargs, message):
+    with pytest.raises(AlpacaError, match=message):
+        alpaca.run_test_order(AutoBroker(), **{"symbol": "SPY", "qty": 1, **kwargs})
+
+
+@pytest.mark.unit
+def test_a_test_order_refuses_a_closed_market_a_blocked_account_and_an_untradable_symbol():
+    closed = AutoBroker()
+    closed.clock_data["is_open"] = False
+    with pytest.raises(AlpacaError, match="closed"):
+        alpaca.run_test_order(closed, "SPY", 1, send=True)
+    assert closed.calls == []
+    blocked = AutoBroker()
+    blocked.acct["trading_blocked"] = True
+    with pytest.raises(AlpacaError, match="cannot trade"):
+        alpaca.run_test_order(blocked, "SPY", 1)
+    untradable = AutoBroker()
+    untradable.asset = lambda symbol: {"tradable": False}
+    with pytest.raises(AlpacaError, match="not tradable"):
+        alpaca.run_test_order(untradable, "SPY", 1)
+
+
+@pytest.mark.unit
+def test_the_cli_test_order_dry_run_then_send(monkeypatch):
+    broker = AutoBroker(buy=50.0, sell=49.99)
+    monkeypatch.setattr(alpaca, "AlpacaPaper", lambda *a, **k: broker)
+    dry = CLI.invoke(app, ["paper", "pairs", "alpaca", "test-order", "KO"])
+    assert dry.exit_code == 0 and "DRY RUN" in dry.output and broker.calls == []
+    sent = CLI.invoke(app, ["paper", "pairs", "alpaca", "test-order", "KO", "--qty", "2", "--send"])
+    assert sent.exit_code == 0 and "Round trip cost" in sent.output and len(broker.calls) == 2
+    broker.fills_for = {"buy"}
+    broker.sides.clear()
+    stuck = CLI.invoke(app, ["paper", "pairs", "alpaca", "test-order", "KO", "--send", "--timeout", "0.3"])
+    assert stuck.exit_code == 1

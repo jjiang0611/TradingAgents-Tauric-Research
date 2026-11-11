@@ -25,8 +25,10 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import re
+import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -393,3 +395,93 @@ def reconcile(account: PairsAccount, broker, mirror: Mirror, path: Path, closes:
             report.drift.append(f"{symbol}: sent orders net {net.get(symbol, 0.0):+.0f}, Alpaca holds {held.get(symbol, 0.0):+.0f}"
                                 " (other activity in this account will show here too)")
     return report
+
+
+# --- a one-shot plumbing check ------------------------------------------------------------
+
+TEST_MAX_QTY = 10      # a plumbing check never needs more than a handful of shares
+
+
+@dataclass
+class PlumbingResult:
+    lines: list[str] = field(default_factory=list)
+    ok: bool = True
+
+
+def wait_for_fill(broker, client_order_id: str, timeout: float = 30.0, interval: float = 2.0,
+                  sleep=time.sleep, clock=time.monotonic) -> dict:
+    """Poll one order until it reaches a final status or ``timeout`` seconds pass."""
+    deadline = clock() + timeout
+    while True:
+        data = broker.order_by_client_id(client_order_id)
+        if data.get("status") in FINAL or clock() >= deadline:
+            return data
+        sleep(min(interval, max(deadline - clock(), 0.05)))
+
+
+def run_test_order(broker, symbol: str = "SPY", qty: int = 1, send: bool = False, keep: bool = False,
+                   sleep=time.sleep, clock=time.monotonic, stamp: str | None = None,
+                   timeout: float = 30.0) -> PlumbingResult:
+    """Prove the keys and the order path work without waiting for a strategy signal.
+
+    Buys ``qty`` shares at market and, unless ``keep``, sells them straight back so the
+    paper account ends flat, then reports both fills and what the round trip cost. A dry
+    run (the default) checks the account and the symbol and sends nothing. The order ids
+    carry a timestamp, so the check can be repeated; none of it enters the strategy's
+    mirror ledger.
+    """
+    symbol = symbol.upper().strip()
+    if not re.fullmatch(r"[A-Z]{1,5}(\.[A-Z])?", symbol):
+        raise AlpacaError(f"{symbol!r} does not look like a ticker")
+    if not 1 <= qty <= TEST_MAX_QTY:
+        raise AlpacaError(f"a test order is 1 to {TEST_MAX_QTY} shares; got {qty}")
+    account = broker.account()
+    if account.get("status") != "ACTIVE" or account.get("trading_blocked"):
+        raise AlpacaError(f"the Alpaca paper account cannot trade (status {account.get('status')}, "
+                          f"blocked {account.get('trading_blocked')})")
+    if not broker.asset(symbol).get("tradable"):
+        raise AlpacaError(f"{symbol} is not tradable on Alpaca")
+    result = PlumbingResult([f"Paper account is ACTIVE, buying power ${float(account.get('buying_power') or 0):,.2f}; "
+                             f"{symbol} is tradable."])
+    plan = f"buy {qty} {symbol} at market" + ("" if keep else f", then sell {qty} {symbol} to finish flat")
+    if not send:
+        result.lines.append(f"DRY RUN: would {plan}. Add --send, during market hours, to do it.")
+        return result
+    check_market(broker, "day")
+    tag = stamp or datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+    result.lines.append(f"Sending to Alpaca PAPER: {plan}.")
+
+    def fill(side: str) -> dict | None:
+        cid = f"ta-test-{tag}-{symbol}-{side}"
+        broker.submit_order(symbol, qty, side, "day", cid)
+        data = wait_for_fill(broker, cid, timeout=timeout, sleep=sleep, clock=clock)
+        if data.get("status") == "filled" and data.get("filled_avg_price"):
+            result.lines.append(f"  {side} {data.get('filled_qty', qty)} {symbol} filled at ${float(data['filled_avg_price']):,.4f}")
+            return data
+        if data.get("id") and data.get("status") not in FINAL:
+            try:
+                broker.cancel_order(data["id"])
+                result.lines.append(f"  {side} order was still {data.get('status')} after {timeout:.0f}s and was cancelled")
+            except AlpacaError as exc:
+                result.lines.append(f"  {side} order is still {data.get('status')} and could not be cancelled ({exc})")
+        else:
+            result.lines.append(f"  {side} order ended {data.get('status')}")
+        return None
+
+    bought = fill("buy")
+    if bought is None:
+        result.ok = False
+        result.lines.append("The buy did not fill, so nothing was sold. Check the order in Alpaca's paper dashboard.")
+        return result
+    if keep:
+        result.lines.append(f"Position left open as asked: you hold {qty} {symbol} on paper.")
+        return result
+    sold = fill("sell")
+    if sold is None:
+        result.ok = False
+        result.lines.append(f"The sell did not fill: you still hold {qty} {symbol} on paper. Close it in Alpaca's paper dashboard.")
+        return result
+    buy_px, sell_px = float(bought["filled_avg_price"]), float(sold["filled_avg_price"])
+    result.lines.append(f"Round trip cost ${(buy_px - sell_px) * qty:+,.2f} ({(buy_px - sell_px) / buy_px * 1e4:+.1f} bps). "
+                        "The keys, the order path and the fills all work.")
+    return result

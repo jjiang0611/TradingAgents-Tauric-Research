@@ -413,6 +413,31 @@ def alpaca_account():
         console.print("  no open positions")
 
 
+@alpaca_app.command("test-order")
+def alpaca_test_order(
+    symbol: str = typer.Argument("SPY", help="A liquid ticker to buy and sell"),
+    qty: int = typer.Option(1, "--qty", help="Shares, 1 to 10"),
+    send: bool = typer.Option(False, "--send", help="Actually send it to the paper account. Without it this is a dry run."),
+    keep: bool = typer.Option(False, "--keep", help="Leave the bought shares in the paper account instead of selling them back"),
+    timeout: float = typer.Option(30.0, "--timeout", help="Seconds to wait for each order to fill before cancelling it"),
+):
+    """Prove your keys and the order path work: buy a few shares on paper and sell them straight back.
+
+    Needs the market open, and does not depend on the pairs strategy having a signal.
+    """
+    from tradingagents.paper import alpaca
+
+    try:
+        result = alpaca.run_test_order(alpaca.AlpacaPaper(), symbol, qty, send, keep, timeout=timeout)
+    except alpaca.AlpacaError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    for line in result.lines:
+        console.print(line, markup=False, highlight=False)
+    if not result.ok:
+        raise typer.Exit(code=1)
+
+
 @alpaca_app.command("send")
 def alpaca_send(
     name: str = typer.Argument(..., help="Pairs account name"),
