@@ -145,23 +145,30 @@ class PaperAccount(BaseModel):
             filled.append(order)
         return filled
 
+    def intended_shares(self, rating: str, held: float, price: float, slip: float = 0.0) -> float:
+        """Signed shares the rating's rules would trade (positive buys), before any cash cap.
+
+        Pure: it reads only the account's rules and the numbers it is given, so the
+        simulator and anything mirroring it (the Alpaca paper mirror) cannot drift apart.
+        ``held`` is the shares currently held, ``slip`` the fractional price concession.
+        """
+        value = held * price
+        target = self.weights.get(rating, 0.0) * self.sleeve
+        tolerance = self.band * self.sleeve
+        if rating == "Sell":
+            return -held
+        if rating == "Buy" and target - value > tolerance:
+            return (target - value) / (price * (1 + slip))
+        if rating == "Overweight" and abs(target - value) > tolerance:
+            return (target - value) / (price * (1 + slip if target > value else 1 - slip))
+        if rating == "Underweight" and value - target > tolerance:
+            return -(value - target) / (price * (1 - slip))
+        return 0.0
+
     def _fill(self, order: Order, fill_date: str, close: float) -> None:
         slip = self.slippage_bps / 10_000
         held = self.holdings().get(order.ticker, (0.0, None))[0]
-        value = held * close
-        target = self.weights[order.rating] * self.sleeve
-        tolerance = self.band * self.sleeve
-        rating = order.rating
-
-        shares = 0.0
-        if rating == "Sell":
-            shares = -held
-        elif rating == "Buy" and target - value > tolerance:
-            shares = (target - value) / (close * (1 + slip))
-        elif rating == "Overweight" and abs(target - value) > tolerance:
-            shares = (target - value) / (close * (1 + slip if target > value else 1 - slip))
-        elif rating == "Underweight" and value - target > tolerance:
-            shares = -(value - target) / (close * (1 - slip))
+        shares = self.intended_shares(order.rating, held, close, slip)
 
         order.fill_date = fill_date
         if shares > 0:

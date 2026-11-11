@@ -28,9 +28,17 @@ import pandas as pd
 
 from tradingagents.backtest import summarize
 from tradingagents.dataflows.date_window import get_current_date
+from tradingagents.dataflows.files import locked
 from tradingagents.dataflows.symbols import safe_ticker_component
 from tradingagents.dataflows.vendors.yahoo.market import get_closes
 from tradingagents.paper.account import PaperAccount, max_drawdown, total_return
+from tradingagents.paper.alpaca import AlpacaError, Mirror
+from tradingagents.paper.alpaca_llm import (
+    build_alpaca_state,
+    llm_mirror_path,
+    plan_llm_orders,
+    send_llm_plan,
+)
 from tradingagents.paper.runner import (
     BENCHMARK,
     MIN_DECISIONS_FOR_A_VIEW,
@@ -191,9 +199,18 @@ def _page() -> str:
     return resources.files("tradingagents.paper").joinpath("dashboard.html").read_text(encoding="utf-8")
 
 
+ALPACA_TTL_SECONDS = 15
+
+
 def make_server(config: dict, name: str, host: str = "127.0.0.1", port: int = 8765,
-                fetch=get_closes, runner: Callable = run_day) -> ThreadingHTTPServer:
-    """Build (not start) the dashboard server. ``port=0`` picks a free port."""
+                fetch=get_closes, runner: Callable = run_day, alpaca=None,
+                max_order_usd: float | None = None) -> ThreadingHTTPServer:
+    """Build (not start) the dashboard server. ``port=0`` picks a free port.
+
+    ``alpaca`` is an ``AlpacaPaper`` client (or a stand-in); without it the Alpaca section is
+    off and no route can send an order. With it, the page can send the agents' suggestions to
+    the paper account, but only from a plan this server builds itself.
+    """
     if not account_path(config, name).is_file():
         raise FileNotFoundError(f"no paper account {name!r}")
     token = secrets.token_urlsafe(24)
@@ -209,6 +226,42 @@ def make_server(config: dict, name: str, host: str = "127.0.0.1", port: int = 87
                 cache["state"] = build_state(PaperAccount.load(account_path(config, name)), config, fetch)
                 cache["at"] = time.time()
             return cache["state"]
+
+    alpaca_cache: dict = {"at": 0.0, "state": None}
+
+    def alpaca_state() -> dict:
+        if alpaca is None:
+            return {"enabled": False}
+        with cache_lock:
+            fresh = time.time() - alpaca_cache["at"] < ALPACA_TTL_SECONDS
+            finished_since = runs.snapshot().get("finished", 0) > alpaca_cache["at"]
+            if not fresh or finished_since:
+                try:
+                    alpaca_cache["state"] = build_alpaca_state(
+                        PaperAccount.load(account_path(config, name)), config, alpaca, fetch, max_order_usd)
+                except AlpacaError as exc:
+                    alpaca_cache["state"] = {"enabled": True, "error": str(exc)}
+                alpaca_cache["at"] = time.time()
+            return alpaca_cache["state"]
+
+    def send_to_alpaca() -> tuple[dict, int]:
+        """Build the plan here, from the account and what Alpaca holds, and send it."""
+        path = llm_mirror_path(config, name)
+        with locked(path, wait=False) as held:
+            if not held:
+                return {"error": "another send is in progress"}, 409
+            account = PaperAccount.load(account_path(config, name))
+            closes = fetch_all(account, fetch)
+            mirror = Mirror.load(path)
+            positions = {p["symbol"]: float(p["qty"]) for p in alpaca.positions()}
+            plan = plan_llm_orders(account, closes, positions, mirror, "day", max_order_usd)
+            if not plan.orders:
+                return {"sent": [], "refused": [], "skipped": plan.skipped}, 200
+            result = send_llm_plan(alpaca, plan, mirror, path)
+        with cache_lock:
+            alpaca_cache["at"] = 0.0
+        return {"sent": [o.model_dump() for o in result.sent], "refused": result.refused,
+                "skipped": plan.skipped}, 200
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "PaperDashboard"
@@ -252,6 +305,11 @@ def make_server(config: dict, name: str, host: str = "127.0.0.1", port: int = 87
                     return self._json(state())
                 if url.path == "/api/run":
                     return self._json(runs.snapshot())
+                if url.path == "/api/alpaca":
+                    if query.get("refresh"):
+                        with cache_lock:
+                            alpaca_cache["at"] = 0.0
+                    return self._json(alpaca_state())
                 if url.path == "/api/research":
                     ticker, date = (query.get("ticker") or [""])[0], (query.get("date") or [""])[0]
                     account = PaperAccount.load(account_path(config, name))
@@ -267,7 +325,8 @@ def make_server(config: dict, name: str, host: str = "127.0.0.1", port: int = 87
         def do_POST(self):
             if not self._allowed_host():
                 return self._json({"error": "unexpected Host header"}, 403)
-            if urlparse(self.path).path != "/api/run":
+            route = urlparse(self.path).path
+            if route not in ("/api/run", "/api/alpaca/send") or (route == "/api/alpaca/send" and alpaca is None):
                 return self._json({"error": "not found"}, 404)
             if not secrets.compare_digest(self.headers.get("X-Dashboard-Token") or "", token):
                 return self._json({"error": "missing or wrong token; reload the page"}, 403)
@@ -278,6 +337,14 @@ def make_server(config: dict, name: str, host: str = "127.0.0.1", port: int = 87
                 body = json.loads(self.rfile.read(length) or b"{}")
             except (ValueError, json.JSONDecodeError):
                 return self._json({"error": "body is not JSON"}, 400)
+            if route == "/api/alpaca/send":
+                try:
+                    payload, status = send_to_alpaca()
+                except AlpacaError as exc:
+                    return self._json({"error": str(exc)}, 502)
+                except Exception as exc:
+                    return self._json({"error": str(exc)}, 500)
+                return self._json(payload, status)
             date = body.get("date") if isinstance(body, dict) else None
             if date is not None and not (isinstance(date, str) and _DATE.match(date)):
                 return self._json({"error": "date must be YYYY-MM-DD"}, 400)

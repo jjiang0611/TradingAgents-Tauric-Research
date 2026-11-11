@@ -149,6 +149,14 @@ dialog::backdrop { background: rgba(0,0,0,.5); }
     <div class="calls" id="calls"></div>
   </section>
 
+  <section class="card" aria-labelledby="alpacaTitle" id="alpacaCard">
+    <div class="card-head">
+      <h2 id="alpacaTitle">Alpaca paper trading</h2>
+      <div class="row"><span class="sub" id="alpacaStatus"></span><button id="alpacaRefresh">Refresh</button></div>
+    </div>
+    <div id="alpacaBody"><p class="sub">Loading…</p></div>
+  </section>
+
   <section class="card" aria-labelledby="holdTitle">
     <div class="card-head"><h2 id="holdTitle">Holdings</h2></div>
     <div class="scroll" id="holdings"></div>
@@ -401,7 +409,7 @@ function hint() {
 }
 async function poll() {
   clearTimeout(pollTimer);
-  try { const r = await api("/api/run"); if (renderRun(r)) pollTimer = setTimeout(poll, 2000); else if (r.state === "done" || r.state === "error") await load(true); }
+  try { const r = await api("/api/run"); if (renderRun(r)) pollTimer = setTimeout(poll, 2000); else if (r.state === "done" || r.state === "error") { await load(true); loadAlpaca(true); } }
   catch (e) { banner("Lost contact with the dashboard server: " + e.message, "error"); }
 }
 async function startRun() {
@@ -409,6 +417,70 @@ async function startRun() {
   if (!confirm(`Analyze ${S.tickers.join(", ")} for ${date}?\n\nThis makes ${n} full multi-agent run${n > 1 ? "s" : ""} against your LLM provider and uses tokens. Nothing is traded.`)) return;
   try { await api("/api/run", { method: "POST", headers: { "Content-Type": "application/json", "X-Dashboard-Token": TOKEN }, body: JSON.stringify({ date }) }); poll(); }
   catch (e) { banner(e.message, "error"); }
+}
+
+/* ---------- alpaca paper trading ---------- */
+let A = null;
+const tileEl = (label, value, cls, note) => el("div", { class: "kpi" }, el("div", { class: "label", text: label }), el("div", { class: "value " + (cls || ""), text: value }), el("div", { class: "note", text: note || "" }));
+async function loadAlpaca(refresh) {
+  try { A = await api("/api/alpaca" + (refresh ? "?refresh=1" : "")); }
+  catch (e) { A = { enabled: true, error: e.message }; }
+  renderAlpaca();
+}
+function renderAlpaca() {
+  const body = $("alpacaBody"), status = $("alpacaStatus");
+  if (!A || A.enabled === false) {
+    status.textContent = "off";
+    body.replaceChildren(el("p", { class: "sub", text: "Off. Start the dashboard with --alpaca (your Alpaca paper keys in .env) to send the agents' suggestions to a paper account and track how they do." }));
+    return;
+  }
+  if (A.error) { status.textContent = "error"; body.replaceChildren(el("p", { class: "neg", text: A.error })); return; }
+  const m = A.metrics, open = A.market.is_open;
+  status.textContent = `Paper account ${A.account.number} · ${A.account.status} · market ${open ? "open" : "closed"}`;
+  const kids = [el("div", { class: "kpis" },
+    tileEl("Alpaca paper equity", money(A.account.equity), "", m.baseline_equity ? "First order at " + money(m.baseline_equity, 0) : "No order sent yet"),
+    tileEl("Return since first order", pct(m.return_since), sign(m.return_since), "Compare with the simulation and SPY above"),
+    tileEl("Orders filled", `${m.filled} of ${m.sent}`, "", `${m.rejected} refused or cancelled · ${m.open} open`),
+    tileEl("Cost vs the official close", m.mean_cost_bps == null ? "–" : (m.mean_cost_bps >= 0 ? "+" : "") + m.mean_cost_bps.toFixed(1) + " bps", "", `Simulation assumes ${m.assumed_bps} bps · ${m.fills_measured} fill(s)`))];
+
+  // what is ready to send
+  const n = A.plan.length;
+  const head = el("div", { class: "row", style: "justify-content:space-between;margin-top:16px" }, el("h3", { style: "margin:0;font-size:14px", text: "Ready to send" }),
+    n ? el("button", { class: "primary", id: "alpacaSend", onclick: sendToAlpaca }, `Send ${n} order${n > 1 ? "s" : ""} to Alpaca paper`) : null);
+  kids.push(head);
+  if (n) {
+    kids.push(el("div", { class: "scroll" }, table(["Ticker", "Rating", "Action", "Shares", "~Price", "~Value"],
+      A.plan.map((o) => [o.ticker, badge(o.rating), (o.side === "buy" ? "Buy" : "Sell"), num(o.qty), money(o.price), money(o.notional, 0)]), [3, 4, 5])));
+    kids.push(el("p", { class: "sub", text: open ? "The market is open: these fill at once, at the market price. Paper money only." : "The market is closed: these day orders queue and fill at the next open. Paper money only." }));
+  } else kids.push(el("p", { class: "sub", text: "Nothing to send. Run the agents first, or the latest suggestions need no trade." }));
+  if (A.skipped.length) kids.push(el("div", { class: "sub" }, A.skipped.map((t) => el("div", { text: "· " + t }))));
+
+  // what was sent
+  kids.push(el("h3", { style: "margin:18px 0 6px;font-size:14px", text: "Sent orders and fills" }));
+  kids.push(A.orders.length ? el("div", { class: "scroll" }, table(["Sent", "Ticker", "Rating", "Side", "Shares", "Status", "Fill", "vs close (bps)"],
+    A.orders.slice(0, 40).map((o) => [o.submitted_at.slice(0, 16).replace("T", " "), o.symbol, badge(o.action), o.side, num(o.qty),
+      o.status + (o.error ? " · " + o.error : ""), o.filled_avg_price ? money(o.filled_avg_price) : "–", o.vs_close_bps == null ? "–" : (o.vs_close_bps >= 0 ? "+" : "") + o.vs_close_bps.toFixed(1)]), [4, 6, 7]))
+    : el("p", { class: "sub", text: "No orders sent yet." }));
+
+  // what Alpaca holds
+  kids.push(el("h3", { style: "margin:18px 0 6px;font-size:14px", text: "Positions on Alpaca" }));
+  kids.push(A.positions.length ? el("div", { class: "scroll" }, table(["Symbol", "Shares", "Avg entry", "Price", "Unrealized P&L", "%"],
+    A.positions.map((p) => [p.symbol, num(p.qty), money(p.avg_entry), money(p.price), el("span", { class: sign(p.pl) }, (p.pl > 0 ? "▲ " : p.pl < 0 ? "▼ " : "") + money(p.pl)), el("span", { class: sign(p.pl_pct) }, pct(p.pl_pct))]), [1, 2, 3, 4, 5]))
+    : el("p", { class: "sub", text: "Flat." }));
+  if (A.drift.length) kids.push(el("div", { class: "sub" }, el("div", { text: "Positions that do not match what was sent:" }), A.drift.map((t) => el("div", { text: "· " + t }))));
+  kids.push(el("p", { class: "sub", style: "margin-top:14px", text: "How to read this: it shows what happened when the agents' ratings were actually executed. Under 30 filled decisions it is an anecdote, not evidence. Judge the return against buy-and-hold of the same tickers and SPY, not against zero." }));
+  body.replaceChildren(...kids);
+}
+async function sendToAlpaca() {
+  if (!A || !A.plan.length) return;
+  const lines = A.plan.map((o) => `${o.side.toUpperCase()} ${o.qty} ${o.ticker} (about ${money(o.notional, 0)}), a ${o.rating}`);
+  if (!confirm(`Send ${A.plan.length} order(s) to your Alpaca PAPER account?\n\n${lines.join("\n")}\n\nSimulated money only.`)) return;
+  const btn = $("alpacaSend"); if (btn) btn.disabled = true;
+  try {
+    const r = await api("/api/alpaca/send", { method: "POST", headers: { "Content-Type": "application/json", "X-Dashboard-Token": TOKEN }, body: "{}" });
+    banner(`Alpaca paper: sent ${r.sent.length} order(s)` + (r.refused.length ? `; refused ${r.refused.length}: ${r.refused.join("; ")}` : "."), r.refused.length ? "error" : "");
+  } catch (e) { banner("Alpaca send failed: " + e.message, "error"); }
+  await loadAlpaca(true);
 }
 
 /* ---------- boot ---------- */
@@ -431,7 +503,8 @@ $("ordFilter").addEventListener("change", () => { orderLimit = 20; renderOrders(
 $("ranges").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; rangeDays = +b.dataset.days; [...$("ranges").children].forEach((x) => x.classList.toggle("on", x === b)); renderChart(); });
 $("tableToggle").addEventListener("click", (e) => { const on = e.target.getAttribute("aria-pressed") !== "true"; e.target.setAttribute("aria-pressed", String(on)); $("curveTable").hidden = !on; $("chartWrap").hidden = on; $("ranges").hidden = on; });
 let rz; window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => S && renderChart(), 120); });
-(async () => { await load(false); poll(); })();
+$("alpacaRefresh").addEventListener("click", () => loadAlpaca(true));
+(async () => { await load(false); loadAlpaca(false); poll(); })();
 </script>
 </body>
 </html>

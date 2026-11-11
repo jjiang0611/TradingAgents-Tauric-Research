@@ -264,15 +264,32 @@ def paper_dashboard(
     name: str = typer.Argument(..., help="Account name"),
     port: int = typer.Option(8765, "--port", help="Local port; the server only listens on 127.0.0.1"),
     open_browser: bool = typer.Option(True, "--open/--no-open", help="Open the dashboard in your browser"),
+    alpaca_on: bool = typer.Option(
+        False, "--alpaca",
+        help="Also show an Alpaca PAPER section that can send the agents' suggestions as paper orders "
+        "(needs ALPACA_PAPER_API_KEY and ALPACA_PAPER_API_SECRET in .env)"),
+    max_order_usd: float = typer.Option(
+        None, "--max-order-usd", help="With --alpaca: refuse any buy above this many dollars; default is one ticker's capital"),
 ):
     """Serve the account, its research and a Run button on http://127.0.0.1."""
     import webbrowser
 
+    from tradingagents.paper import alpaca as alpaca_module
     from tradingagents.paper.dashboard import make_server
 
     _paper_account(name)
+    broker = None
+    if alpaca_on:
+        try:
+            broker = alpaca_module.AlpacaPaper()
+            info = broker.account()
+        except alpaca_module.AlpacaError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1) from None
+        console.print(f"Alpaca PAPER account ...{str(info.get('account_number', ''))[-4:]}: {info.get('status')}",
+                      markup=False, highlight=False)
     try:
-        server = make_server(DEFAULT_CONFIG, name, port=port)
+        server = make_server(DEFAULT_CONFIG, name, port=port, alpaca=broker, max_order_usd=max_order_usd)
     except OSError as exc:
         console.print(f"[red]Cannot listen on port {port}: {exc}. Try --port.[/red]")
         raise typer.Exit(code=1) from None

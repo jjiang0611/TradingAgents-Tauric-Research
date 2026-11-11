@@ -178,3 +178,76 @@ def test_a_failed_run_is_reported_not_raised(tmp_path):
         time.sleep(0.05)
     assert manager.snapshot()["state"] == "error" and "no API key" in manager.snapshot()["error"]
     assert isinstance(PaperAccount.load(runner.account_path(config, "main")), PaperAccount)
+
+
+# ---------- the Alpaca section ----------
+
+@pytest.fixture
+def served_alpaca(tmp_path, monkeypatch):
+    from tests.test_paper_alpaca import FakeBroker
+
+    _allow_loopback_only(monkeypatch)
+    monkeypatch.setattr(runner, "get_current_date", lambda: "2026-03-10")
+    monkeypatch.setattr(dash, "get_current_date", lambda: "2026-03-10")
+    config = {"results_dir": str(tmp_path)}
+    account = runner.create_account(config, "main", ["AAA"], 1000.0, slippage_bps=0, created="2026-03-01")
+    account.record("AAA", "2026-03-09", "Buy")                   # the last completed close in PRICES
+    account.save(runner.account_path(config, "main"))
+    prices = {"AAA": [10, 10, 11, 12, 12, 13], "SPY": PRICES["SPY"]}
+    broker = FakeBroker()
+    server = dash.make_server(config, "main", port=0, fetch=lambda t, s, e: pd.Series(prices[t], index=DAYS, dtype=float),
+                              alpaca=broker)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield server, broker, config
+    server.shutdown()
+    server.server_close()
+
+
+@pytest.mark.unit
+def test_without_alpaca_the_section_is_off_and_no_route_can_send(served):
+    server, _, _ = served
+    assert json.loads(call(server, "GET", "/api/alpaca")[1]) == {"enabled": False}
+    headers = {"Content-Type": "application/json", "X-Dashboard-Token": token_of(server)}
+    assert call(server, "POST", "/api/alpaca/send", "{}", headers)[0] == 404
+
+
+@pytest.mark.unit
+def test_alpaca_state_shows_the_plan_and_never_sends_on_a_get(served_alpaca):
+    server, broker, _ = served_alpaca
+    state = json.loads(call(server, "GET", "/api/alpaca")[1])
+    assert state["enabled"] and state["error"] is None and state["account"]["number"] == "...0001"
+    assert [(o["ticker"], o["side"]) for o in state["plan"]] == [("AAA", "buy")]
+    assert broker.calls == []
+
+
+@pytest.mark.unit
+def test_sending_needs_the_token_and_a_host_check_and_sends_once(served_alpaca):
+    server, broker, _ = served_alpaca
+    json_type = {"Content-Type": "application/json"}
+    assert call(server, "POST", "/api/alpaca/send", "{}", json_type)[0] == 403
+    assert call(server, "POST", "/api/alpaca/send", "{}", {**json_type, "X-Dashboard-Token": token_of(server)}, host="evil.example")[0] == 403
+    assert broker.calls == []
+    headers = {**json_type, "X-Dashboard-Token": token_of(server)}
+    status, data = call(server, "POST", "/api/alpaca/send", "{}", headers)
+    body = json.loads(data)
+    assert status == 200 and len(body["sent"]) == 1 and body["refused"] == [] and len(broker.calls) == 1
+    again = json.loads(call(server, "POST", "/api/alpaca/send", "{}", headers)[1])
+    assert again["sent"] == [] and len(broker.calls) == 1                       # a suggestion is sent once
+    state = json.loads(call(server, "GET", "/api/alpaca?refresh=1")[1])
+    assert state["metrics"]["sent"] == 1 and state["plan"] == []
+
+
+@pytest.mark.unit
+def test_an_alpaca_failure_is_reported_not_raised(served_alpaca):
+    from tradingagents.paper.alpaca import AlpacaError
+
+    server, broker, _ = served_alpaca
+
+    def down():
+        raise AlpacaError("Alpaca GET /v2/account: HTTP 401 unauthorized")
+
+    broker.account = down
+    state = json.loads(call(server, "GET", "/api/alpaca?refresh=1")[1])
+    assert state["enabled"] and "401" in state["error"]
+    status, data = call(server, "POST", "/api/alpaca/send", "{}", {"Content-Type": "application/json", "X-Dashboard-Token": token_of(server)})
+    assert status == 502 and "401" in json.loads(data)["error"]

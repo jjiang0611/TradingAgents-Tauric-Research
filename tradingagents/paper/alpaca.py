@@ -83,9 +83,10 @@ class AlpacaPaper:
     def asset(self, symbol: str) -> dict:
         return self._call("GET", f"/v2/assets/{symbol}")
 
-    def submit_order(self, symbol: str, qty: int, side: str, time_in_force: str, client_order_id: str) -> dict:
+    def submit_order(self, symbol: str, qty: float, side: str, time_in_force: str, client_order_id: str) -> dict:
+        text = str(int(qty)) if float(qty).is_integer() else f"{qty:.6f}".rstrip("0")
         return self._call("POST", "/v2/orders", json={
-            "symbol": symbol, "qty": str(qty), "side": side, "type": "market",
+            "symbol": symbol, "qty": text, "side": side, "type": "market",
             "time_in_force": time_in_force, "client_order_id": client_order_id})
 
     def order_by_client_id(self, client_order_id: str) -> dict:
@@ -104,7 +105,7 @@ class MirrorOrder(BaseModel):
     action: str                         # "enter" or "exit"
     symbol: str
     side: str                           # "buy" or "sell"
-    qty: int
+    qty: float
     tif: str
     submitted_at: str
     alpaca_id: str | None = None
@@ -117,6 +118,9 @@ class MirrorOrder(BaseModel):
 
 class Mirror(BaseModel):
     orders: list[MirrorOrder] = []
+    baseline_equity: float | None = None      # the paper account's equity when the first order was sent
+    baseline_at: str | None = None
+    baseline_positions: dict[str, float] = {}  # what the account already held before the first order
 
     def sent(self, trade_key: str, action: str) -> list[MirrorOrder]:
         return [o for o in self.orders if o.trade_key == trade_key and o.action == action]
@@ -145,7 +149,7 @@ class Planned:
     action: str
     symbol: str
     side: str
-    qty: int
+    qty: float
     tif: str
     client_order_id: str
     price: float                        # the last close, for the dollar caps and the printout
@@ -344,9 +348,8 @@ class Reconciliation:
         return "\n".join(lines)
 
 
-def reconcile(account: PairsAccount, broker, mirror: Mirror, path: Path, closes: dict[str, pd.Series]) -> Reconciliation:
-    """Refresh every mirrored order from Alpaca, then compare fills with the simulation."""
-    report = Reconciliation(assumed_bps=account.slippage_bps)
+def refresh_orders(broker, mirror: Mirror, path: Path) -> None:
+    """Bring every not-yet-final mirrored order up to date from Alpaca, then save."""
     for order in mirror.orders:
         if order.status in FINAL:
             continue
@@ -361,6 +364,22 @@ def reconcile(account: PairsAccount, broker, mirror: Mirror, path: Path, closes:
         order.filled_avg_price = float(data["filled_avg_price"]) if data.get("filled_avg_price") else None
         order.filled_at = data.get("filled_at")
     mirror.save(path)
+
+
+def close_on(closes: dict[str, pd.Series], symbol: str, filled_at: str | None) -> float | None:
+    """The official close of ``symbol`` on the New York day an order filled, if known."""
+    if not filled_at or symbol not in closes:
+        return None
+    stamp = pd.Timestamp(filled_at)
+    day = (stamp.tz_convert("America/New_York").tz_localize(None) if stamp.tzinfo else stamp).normalize()
+    same = closes[symbol][closes[symbol].index == day]
+    return float(same.iloc[0]) if len(same) else None
+
+
+def reconcile(account: PairsAccount, broker, mirror: Mirror, path: Path, closes: dict[str, pd.Series]) -> Reconciliation:
+    """Refresh every mirrored order from Alpaca, then compare fills with the simulation."""
+    report = Reconciliation(assumed_bps=account.slippage_bps)
+    refresh_orders(broker, mirror, path)
     report.open_orders = sum(o.status not in FINAL for o in mirror.orders)
 
     trades = {trade_key(t): t for t in account.trades}
@@ -377,13 +396,7 @@ def reconcile(account: PairsAccount, broker, mirror: Mirror, path: Path, closes:
                 sim = trade.a_entry if o.symbol == a else trade.b_entry
             else:
                 sim = trade.a_exit if o.symbol == a else trade.b_exit
-        close = None
-        if o.filled_at and o.symbol in closes:
-            stamp = pd.Timestamp(o.filled_at)
-            day = (stamp.tz_convert("America/New_York").tz_localize(None) if stamp.tzinfo else stamp).normalize()
-            series = closes[o.symbol]
-            same = series[series.index == day]
-            close = float(same.iloc[0]) if len(same) else None
+        close = close_on(closes, o.symbol, o.filled_at)
         sign = 1 if o.side == "buy" else -1               # positive bps always means worse for us
         report.rows.append(FillRow(
             o.pair, o.action, o.symbol, o.side, o.filled_qty, o.filled_avg_price, sim,

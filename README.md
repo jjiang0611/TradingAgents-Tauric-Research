@@ -406,6 +406,18 @@ One page for the daily routine: account value against buy-and-hold of the same t
 
 It listens on 127.0.0.1 only and has no login. The Run route needs a token that only the served page carries and refuses requests whose Host header is not this server, so a web page you happen to have open cannot start a run. Do not put it behind a tunnel or reverse proxy.
 
+### Run the agents and send their suggestions to Alpaca paper
+
+```bash
+tradingagents paper dashboard main --alpaca
+```
+
+Needs the agents' LLM key and model variables (above) and your Alpaca **paper** keys in `.env` (`ALPACA_PAPER_API_KEY`, `ALPACA_PAPER_API_SECRET`). On the page: **Run analysis** runs the agents, the **Alpaca paper trading** section then lists the orders their newest ratings call for, **Send N orders** puts them into your paper account after a confirmation, and the section tracks fills, the cost against the official close, positions with unrealized P&L, and the paper account's return since the first order.
+
+The orders follow the same rules as the simulated account (Buy builds to a full per-ticker share of the capital, Overweight to half, Underweight trims to a quarter, Sell closes the position, Hold does nothing) but are sized from what Alpaca actually holds. They are long-only, whole-share DAY market orders: sent while the market is open they fill at once, sent when it is closed they queue for the next open. Only the newest rating per ticker is acted on, a suggestion older than the latest close is refused as stale, and each is sent once. The dashboard builds every order itself from the account and Alpaca's holdings; the page can only say "go", and only with the per-session token. `--max-order-usd` caps any single buy. Nothing can reach anything but `paper-api.alpaca.markets`.
+
+What this tells you about reliability: whether the agents' ratings made or lost money when they were actually executed, and how far real fills sit from the simulation's assumed 5 bps. It does not tell you the agents are good: a handful of trades is an anecdote, the section says so under 30 filled decisions, and the honest comparison is buy-and-hold of the same tickers and SPY, not zero. Running the agents costs LLM tokens on every click; each ticker is a full multi-agent run.
+
 ### Daily schedule
 
 ```bash
